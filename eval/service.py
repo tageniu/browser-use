@@ -297,8 +297,8 @@ async def identify_key_points(task, model):
 			'content': [{'type': 'text', 'text': text}],
 		},
 	]
-	response = await asyncio.to_thread(model.invoke, messages)
-	return response.content
+	response = await model.ainvoke(messages)
+	return response.completion
 
 
 async def judge_image(task, image_path, key_points, model):
@@ -350,8 +350,8 @@ The snapshot of the web page is shown in the image."""
 			],
 		},
 	]
-	response = await asyncio.to_thread(model.invoke, messages)
-	return response.content
+	response = await model.ainvoke(messages)
+	return response.completion
 
 
 async def Online_Mind2Web_eval(task, last_actions, images_path, model, score_threshold):
@@ -627,7 +627,7 @@ class TaskResult:
 			# Handle legacy Mind2Web evaluation (for compatibility)
 			payload.update(
 				{
-					'onlineMind2WebEvaluationJudgement': eval_data.get('judgement'),
+					'onlineMind2WebEvaluationJudgement': eval_data.get('judgement') or 'No evaluation available',
 					'onlineMind2WebEvaluationError': eval_data.get('error'),
 					'onlineMind2WebEvaluationSuccess': eval_data.get('success', False),
 					'onlineMind2WebEvaluationScore': eval_data.get('score', 0.0),
@@ -931,6 +931,7 @@ async def reformat_agent_history(
 	task_id: str,
 	run_id: str,
 	task: str,
+	last_message: str,
 	base_path: str = 'saved_trajectories',
 	include_result: bool = False,
 ) -> dict:
@@ -1033,6 +1034,7 @@ async def reformat_agent_history(
 		'action_history': action_history,
 		'screenshot_paths': screenshot_paths,
 		'final_result_response': final_result,
+		'last_message': last_message,
 		'self_report_completed': self_report_completed,
 		'self_report_success': self_report_success,
 		'complete_history': complete_history,
@@ -1109,7 +1111,13 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 	"""
 	result_file = task_folder / 'result.json'
 	if not result_file.exists():
-		return {'task_id': task_folder.name, 'judgement': None, 'success': False, 'error': 'No result.json found', 'score': 0.0}
+		return {
+			'task_id': task_folder.name,
+			'judgement': 'No result.json found',
+			'success': False,
+			'error': 'No result.json found',
+			'score': 0.0,
+		}
 
 	try:
 		async with await anyio.open_file(result_file) as f:
@@ -1140,9 +1148,9 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 
 				messages, text, system_msg, record, key_points = eval_result
 
-				# Final steps to get judgement - run invoke in a thread
-				judgement_msg = await asyncio.to_thread(model.invoke, messages)
-				judgement = judgement_msg.content
+				# Final steps to get judgement - use async invoke directly
+				judgement_response = await model.ainvoke(messages)
+				judgement = judgement_response.completion
 
 				if 'success' in judgement.lower().split('status:')[1]:  # This is the official criteria for success
 					evaluation = {
@@ -1171,7 +1179,7 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 			except Exception as err:
 				return {
 					'task_id': task_folder.name,
-					'judgement': None,
+					'judgement': f'Mind2Web evaluation failed: {type(err).__name__}: {err}',
 					'success': False,
 					'error': f'{type(err).__name__}: {err}',
 					'score': 0.0,
@@ -1207,7 +1215,7 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 				if comprehensive_result.get('error'):
 					return {
 						'task_id': task_folder.name,
-						'judgement': None,
+						'judgement': f'Comprehensive evaluation failed: {comprehensive_result["error"]}',
 						'success': False,
 						'error': comprehensive_result['error'],
 						'score': 0.0,
@@ -1226,7 +1234,7 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 				else:
 					return {
 						'task_id': task_folder.name,
-						'judgement': None,
+						'judgement': 'Comprehensive judge failed to return results',
 						'success': False,
 						'error': 'Comprehensive judge failed to return results',
 						'score': 0.0,
@@ -1236,7 +1244,7 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 				logger.error(f'Comprehensive judge evaluation failed for {task_folder.name}: {err}')
 				return {
 					'task_id': task_folder.name,
-					'judgement': None,
+					'judgement': f'Comprehensive judge error: {type(err).__name__}: {err}',
 					'success': False,
 					'error': f'Comprehensive judge error: {type(err).__name__}: {err}',
 					'score': 0.0,
@@ -1245,7 +1253,7 @@ async def judge_task_result(model, task_folder: Path, score_threshold: float = 3
 	except Exception as err:
 		return {
 			'task_id': task_folder.name,
-			'judgement': None,
+			'judgement': f'Evaluation failed: {type(err).__name__}: {err}',
 			'success': False,
 			'error': f'{type(err).__name__}: {err}',
 			'score': 0.0,
@@ -1310,7 +1318,7 @@ async def run_agent_with_browser(
 	validate_output: bool = False,
 	planner_llm: BaseChatModel | None = None,
 	planner_interval: int = 1,
-) -> AgentHistoryList:
+) -> tuple[AgentHistoryList, str]:
 	"""Run agent with the browser session"""
 	# Create controller, optionally with SERP search
 	controller = create_controller(use_serp=use_serp)
@@ -1334,9 +1342,11 @@ async def run_agent_with_browser(
 		planner_interval=planner_interval,
 		source='eval_platform',
 	)
-
+	# get last message
 	await agent.run(max_steps=max_steps)
-	return agent.state.history
+	last_input_messages = agent.message_manager.last_input_messages
+	last_message = last_input_messages[-1].text
+	return agent.state.history, last_message
 
 
 @observe(name='evaluate_task_result', span_type='EVALUATOR')  # type: ignore[arg-type]
@@ -1489,7 +1499,7 @@ async def run_task_with_semaphore(
 					try:
 						logger.info(f'Task {task.task_id}: Agent run starting.')
 
-						agent_history = await run_stage(
+						agent_history, last_message = await run_stage(
 							Stage.RUN_AGENT,
 							lambda: run_agent_with_browser(
 								browser_session,
@@ -1513,7 +1523,8 @@ async def run_task_with_semaphore(
 					except Exception as e:
 						error = StageError(Stage.RUN_AGENT, 'exception', str(e))
 						task_result.stage_failed(Stage.RUN_AGENT, error)
-						logger.error(f'Task {task.task_id}: Agent run failed: {str(e)}')
+						logger.error(f'Task {task.task_id}: Agent run failed: {str(e) + " " + str(e.__traceback__)}')
+
 						# Continue to server save instead of early return
 
 				# Stage 3: Format history
@@ -1523,7 +1534,12 @@ async def run_task_with_semaphore(
 						formatted_data = await run_stage(
 							Stage.FORMAT_HISTORY,
 							lambda: reformat_agent_history(
-								agent_history, task.task_id, run_id, task.confirmed_task, include_result=include_result
+								agent_history,
+								task.task_id,
+								run_id,
+								task.confirmed_task,
+								last_message,
+								include_result=include_result,
 							),
 						)
 						task_result.stage_completed(Stage.FORMAT_HISTORY, formatted_data)
