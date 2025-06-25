@@ -1,5 +1,6 @@
 # Cache files
 .DS_Store
+.cursorindexingignore
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .ipynb_checkpoints
+.specstory/
 ~/
 
 # Virtual Environments
@@ -26,6 +28,7 @@ dist/
 *.pdf
 *.csv
 *.json
+!config_files/**/*.json
 *.jsonl
 *.log
 *.bak

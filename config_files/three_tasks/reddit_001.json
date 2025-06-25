@@ -1,0 +1,31 @@
+{
+  "task_id": "reddit_001",
+  "intent": "Create a new post in the 'technology' subreddit with title 'Future of AI' and content about AI trends",
+  "start_url": "http://metis.lti.cs.cmu.edu:9999",
+  "sites": ["reddit"],
+  "require_login": true,
+  "storage_state": ".auth/reddit_state.json",
+  "difficulty": "medium",
+  "category": "social_media",
+  "eval": {
+    "type": "functional_correctness",
+    "criteria": [
+      "Should navigate to technology subreddit",
+      "Should create a new post",
+      "Post title should be 'Future of AI'",
+      "Post should contain meaningful content about AI trends",
+      "Post should be successfully submitted and visible"
+    ]
+  },
+  "reference_url": "http://metis.lti.cs.cmu.edu:9999/r/technology/new",
+  "expected_steps": [
+    "Navigate to Reddit",
+    "Login if required",
+    "Navigate to r/technology subreddit",
+    "Click create new post",
+    "Enter title 'Future of AI'",
+    "Write content about AI trends",
+    "Submit the post",
+    "Verify post appears in subreddit"
+  ]
+} 

@@ -1,0 +1,29 @@
+{
+  "task_id": "shopping_001",
+  "intent": "Find the cheapest wireless headphones under $50 and add them to cart",
+  "start_url": "http://metis.lti.cs.cmu.edu:7770",
+  "sites": ["shopping"],
+  "require_login": false,
+  "difficulty": "easy",
+  "category": "e_commerce",
+  "eval": {
+    "type": "functional_correctness",
+    "criteria": [
+      "Should search for wireless headphones",
+      "Should filter products under $50",
+      "Should identify the cheapest option that meets criteria",
+      "Should add the selected product to shopping cart",
+      "Cart should contain the correct item"
+    ]
+  },
+  "reference_url": "http://metis.lti.cs.cmu.edu:7770/cart",
+  "expected_steps": [
+    "Navigate to OneStopShop",
+    "Search for 'wireless headphones'",
+    "Apply price filter under $50",
+    "Sort by price (lowest first)",
+    "Select the cheapest option",
+    "Add to cart",
+    "Verify item is in cart"
+  ]
+} 

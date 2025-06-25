@@ -1,0 +1,33 @@
+{
+  "sites": [
+    "apple"
+  ],
+  "task_id": 812,
+  "require_login": false,
+  "storage_state": null,
+  "start_url": "https://www.apple.com/shop/trade-in",
+  "geolocation": null,
+  "intent_template": "Assign the issue regarding {{issue}} in {{repo}} to {{account}}.",
+  "instantiation_dict": {
+    "repo": "a11yproject",
+    "issue": 404,
+    "account": "myself"
+  },
+  "intent": "Find out the trade-in value for an iPhone 12 Pro Max in very good condition on the Apple website.",
+  "require_reset": false,
+  "eval": {
+    "eval_types": [
+      "string_match"
+    ],
+    "reference_answers": {
+      "must_include": [
+        "280"
+      ]
+    },
+    "reference_url": "",
+    "program_html": [],
+    "string_note": "",
+    "reference_answer_raw_annotation": "$280"
+  },
+  "intent_template_id": 999999
+}

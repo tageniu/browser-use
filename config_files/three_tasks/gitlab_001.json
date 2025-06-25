@@ -1,0 +1,30 @@
+{
+  "task_id": "gitlab_001",
+  "intent": "Create a new issue in the project 'a11yproject' with title 'Add dark mode support' and assign it to the current user",
+  "start_url": "http://metis.lti.cs.cmu.edu:8023",
+  "sites": ["gitlab"],
+  "require_login": true,
+  "storage_state": ".auth/gitlab_state.json",
+  "difficulty": "medium",
+  "category": "software_development",
+  "eval": {
+    "type": "functional_correctness",
+    "criteria": [
+      "An issue with title 'Add dark mode support' should be created",
+      "The issue should be in the 'a11yproject' project",
+      "The issue should be assigned to the current user",
+      "The issue should have a valid ID and be visible in the project issues list"
+    ]
+  },
+  "reference_url": "http://metis.lti.cs.cmu.edu:8023/a11yproject/issues",
+  "expected_steps": [
+    "Navigate to GitLab",
+    "Login if required",
+    "Navigate to a11yproject",
+    "Go to Issues section",
+    "Create new issue",
+    "Fill in title 'Add dark mode support'",
+    "Assign to current user",
+    "Submit the issue"
+  ]
+} 
