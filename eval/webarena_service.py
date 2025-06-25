@@ -406,8 +406,8 @@ Evaluate whether the task was completed successfully with functional correctness
                 last_result = final_step.result[-1]
                 if hasattr(last_result, 'extracted_content') and last_result.extracted_content:
                     return str(last_result.extracted_content)
-            # Handle case where result might be a single ActionResult
-            elif hasattr(final_step.result, 'extracted_content') and final_step.result.extracted_content:
+            # Handle case where result might be a single ActionResult (not a list)
+            elif not isinstance(final_step.result, list) and hasattr(final_step.result, 'extracted_content') and final_step.result.extracted_content:
                 return str(final_step.result.extracted_content)
         
         return "No final content available"
@@ -590,7 +590,6 @@ class WebArenaTaskRunner:
             memory_config = MemoryConfig(
                 agent_id=f"webarena_agent_{task.task_id}",
                 memory_interval=20,
-                adaptive_memory=True,
                 llm_instance=self.llm
             )
             
@@ -747,7 +746,8 @@ def get_llm(model_name: str) -> BaseChatModel:
         if model_name.startswith('gpt'):
             return ChatOpenAI(model=model_name, temperature=0.1)
         elif model_name.startswith('o'):
-            return ChatOpenAI(model=model_name)
+            # o-series models only support temperature=1 (default)
+            return ChatOpenAI(model=model_name, temperature=1)
         else:
             raise ValueError(f"Unsupported model: {model_name}")
     
