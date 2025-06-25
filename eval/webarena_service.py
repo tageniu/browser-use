@@ -1,8 +1,8 @@
 # =========================================================================================================================
 # source .venv/bin/activate
 # Apple Trade-in
-# python eval/webarena_service.py --model gpt-o4-mini --eval-model gpt-o4-mini --start 812 --end 813 --max-steps 15
-# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 812 --end 813 --max-steps 15
+# python eval/webarena_service.py --model gpt-o4-mini --eval-model gpt-o4-mini --start 812 --end 813 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 812 --end 813 --max-steps 15 --max-retries 1
 # =========================================================================================================================
 
 # Reddit
@@ -550,9 +550,11 @@ class WebArenaTaskRunner:
         self.max_steps = max_steps
         self.active_sessions = {}  # Track active browser sessions
     
-    async def run_task(self, task: WebArenaTask) -> Dict:
+    async def run_task(self, task: WebArenaTask, retry_info: Optional[Dict] = None) -> Dict:
         """Run a single WebArena task"""
         logger.info(f"Starting WebArena task: {task.task_id}")
+        if retry_info:
+            logger.info(f"Retry attempt {retry_info.get('retry_attempt', 1)} for task {task.task_id}")
         logger.info(f"Task intent: {task.intent}")
         logger.info(f"Start URL: {task.start_url}")
         logger.info(f"Target sites: {task.sites}")
@@ -615,6 +617,10 @@ class WebArenaTaskRunner:
             logger.info(f"Evaluating task {task.task_id}")
             evaluation = await self.evaluator.evaluate_task_completion(task, agent_history)
             
+            # Add retry information to evaluation if this is a retry
+            if retry_info:
+                evaluation.update(retry_info)
+            
             # Log evaluation results
             logger.info(f"Task {task.task_id} evaluation results:")
             logger.info(f"Success: {evaluation['success']}")
@@ -632,6 +638,10 @@ class WebArenaTaskRunner:
                 'completed_at': datetime.now().isoformat()
             }
             
+            # Add retry metadata if this is a retry
+            if retry_info:
+                result_data['retry_metadata'] = retry_info
+            
             # Save to files
             await self._save_result(task.task_id, result_data)
             await self._save_agent_history(task.task_id, agent_history)
@@ -641,7 +651,7 @@ class WebArenaTaskRunner:
             
         except Exception as e:
             logger.error(f"Error running task {task.task_id}: {str(e)}", exc_info=True)
-            return {
+            error_result = {
                 'task_id': task.task_id,
                 'success': False,
                 'score': 0.0,
@@ -649,6 +659,12 @@ class WebArenaTaskRunner:
                 'functional_correctness': False,
                 'error': str(e)
             }
+            
+            # Add retry information to error result if this is a retry
+            if retry_info:
+                error_result.update(retry_info)
+            
+            return error_result
         finally:
             # Remove from active sessions but don't stop the browser here
             # The browser will be stopped by cleanup_browser_safe in service.py
@@ -689,6 +705,33 @@ class WebArenaTaskRunner:
             await f.write(json.dumps(history_data, indent=2, default=str))
         logger.info(f"Saved agent history to {history_file}")
 
+    async def _save_retry_statistics(self, results: List[Dict], timestamp: str):
+        """Save retry statistics to a separate file for analysis"""
+        retry_stats_dir = Path("saved_trajectories/webarena/retry_stats")
+        retry_stats_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Extract retry information
+        retry_data = []
+        for result in results:
+            if result.get('retry_attempt', 0) > 0:
+                retry_data.append({
+                    'task_id': result.get('task_id'),
+                    'retry_attempt': result.get('retry_attempt'),
+                    'total_attempts': result.get('total_attempts'),
+                    'success': result.get('success'),
+                    'original_failure_reason': result.get('original_failure_reason'),
+                    'final_reasoning': result.get('reasoning'),
+                    'score': result.get('score')
+                })
+        
+        if retry_data:
+            retry_stats_file = retry_stats_dir / f"retry_stats_{timestamp}.json"
+            async with await anyio.open_file(retry_stats_file, 'w') as f:
+                await f.write(json.dumps(retry_data, indent=2, default=str))
+            logger.info(f"Saved retry statistics to {retry_stats_file}")
+        
+        return retry_data
+
 
 async def run_webarena_evaluation(
     tasks: List[WebArenaTask],
@@ -696,9 +739,11 @@ async def run_webarena_evaluation(
     eval_model: BaseChatModel,
     max_parallel: int = 3,
     headless: bool = True,
-    max_steps: int = 20
+    max_steps: int = 20,
+    max_retries: int = 0,
+    retry_delay: int = 5
 ) -> Dict:
-    """Run WebArena evaluation on multiple tasks"""
+    """Run WebArena evaluation on multiple tasks with optional retry for failed tasks"""
     
     evaluator = WebArenaEvaluator(eval_model)
     task_runner = WebArenaTaskRunner(llm, evaluator, headless, max_steps)
@@ -710,14 +755,91 @@ async def run_webarena_evaluation(
         async with semaphore:
             return await task_runner.run_task(task)
     
+    async def run_with_semaphore_and_retry_info(task, retry_info=None):
+        async with semaphore:
+            return await task_runner.run_task(task, retry_info)
+    
     # Run tasks in parallel
     logger.info(f"Running {len(tasks)} WebArena tasks with {max_parallel} parallel workers")
-    results = await asyncio.gather(*[run_with_semaphore(task) for task in tasks])
+    logger.info(f"Max retries: {max_retries}, Retry delay: {retry_delay}s")
+    
+    # Track all results including retries
+    all_results = []
+    failed_tasks = []
+    
+    # Initial run
+    initial_results = await asyncio.gather(*[run_with_semaphore(task) for task in tasks])
+    
+    # Process initial results and identify failed tasks
+    for i, result in enumerate(initial_results):
+        all_results.append(result)
+        if not result.get('success', False):
+            failed_tasks.append((tasks[i], result))
+    
+    # Retry failed tasks
+    for retry_attempt in range(1, max_retries + 1):
+        if not failed_tasks:
+            logger.info(f"No failed tasks to retry after attempt {retry_attempt - 1}")
+            break
+            
+        logger.info(f"Retry attempt {retry_attempt}/{max_retries}: Retrying {len(failed_tasks)} failed tasks")
+        
+        # Wait before retry
+        if retry_delay > 0:
+            logger.info(f"Waiting {retry_delay} seconds before retry...")
+            await asyncio.sleep(retry_delay)
+        
+        # Retry failed tasks with retry information
+        retry_tasks = [task for task, _ in failed_tasks]
+        retry_info_list = [
+            {
+                'retry_attempt': retry_attempt,
+                'total_attempts': retry_attempt + 1,
+                'original_failure_reason': original_result.get('reasoning', 'Unknown')
+            }
+            for _, original_result in failed_tasks
+        ]
+        
+        retry_results = await asyncio.gather(*[
+            run_with_semaphore_and_retry_info(task, retry_info) 
+            for task, retry_info in zip(retry_tasks, retry_info_list)
+        ])
+        
+        # Update results and identify still-failed tasks
+        new_failed_tasks = []
+        for i, (original_task, original_result) in enumerate(failed_tasks):
+            retry_result = retry_results[i]
+            
+            # Update the result in all_results if retry was successful
+            if retry_result.get('success', False):
+                # Find and update the original result
+                for j, result in enumerate(all_results):
+                    if result.get('task_id') == original_task.task_id:
+                        all_results[j] = retry_result
+                        logger.info(f"Task {original_task.task_id} succeeded on retry attempt {retry_attempt}")
+                        break
+            else:
+                # Task still failed, update the result in all_results with retry information
+                for j, result in enumerate(all_results):
+                    if result.get('task_id') == original_task.task_id:
+                        all_results[j] = retry_result
+                        break
+                new_failed_tasks.append((original_task, retry_result))
+                logger.info(f"Task {original_task.task_id} failed on retry attempt {retry_attempt}")
+        
+        failed_tasks = new_failed_tasks
     
     # Calculate summary statistics
-    total_tasks = len(results)
-    successful_tasks = sum(1 for r in results if r.get('success', False))
-    average_score = sum(r.get('score', 0.0) for r in results) / total_tasks if total_tasks > 0 else 0.0
+    total_tasks = len(all_results)
+    successful_tasks = sum(1 for r in all_results if r.get('success', False))
+    average_score = sum(r.get('score', 0.0) for r in all_results) / total_tasks if total_tasks > 0 else 0.0
+    
+    # Count retries - count all results that have retry_attempt field (indicating they were retried)
+    total_retries = sum(1 for r in all_results if 'retry_attempt' in r and r.get('retry_attempt', 0) > 0)
+    successful_retries = sum(1 for r in all_results if r.get('success', False) and 'retry_attempt' in r and r.get('retry_attempt', 0) > 0)
+    
+    # Also count total retry attempts across all tasks (for debugging)
+    total_retry_attempts = sum(r.get('retry_attempt', 0) for r in all_results if 'retry_attempt' in r)
     
     summary = {
         'total_tasks': total_tasks,
@@ -725,14 +847,28 @@ async def run_webarena_evaluation(
         'failed_tasks': total_tasks - successful_tasks,
         'success_rate': successful_tasks / total_tasks if total_tasks > 0 else 0.0,
         'average_score': average_score,
+        'total_retries': total_retries,
+        'total_retry_attempts': total_retry_attempts,
+        'successful_retries': successful_retries,
+        'retry_success_rate': successful_retries / total_retries if total_retries > 0 else 0.0,
         'timestamp': datetime.now().isoformat()
     }
     
     logger.info(f"WebArena evaluation completed: {successful_tasks}/{total_tasks} successful ({summary['success_rate']:.2%})")
+    if total_retries > 0:
+        logger.info(f"Retry statistics: {successful_retries}/{total_retries} retries successful ({summary['retry_success_rate']:.2%})")
+        logger.info(f"Total retry attempts across all tasks: {total_retry_attempts}")
+    else:
+        logger.info("No retries were performed")
+    
+    # Debug: Print retry information for each result
+    for result in all_results:
+        if 'retry_attempt' in result:
+            logger.info(f"Task {result.get('task_id')}: retry_attempt={result.get('retry_attempt')}, success={result.get('success')}")
     
     return {
         'summary': summary,
-        'results': results
+        'results': all_results
     }
 
 
@@ -797,6 +933,10 @@ if __name__ == '__main__':
                         help='Start task index')
     parser.add_argument('--end', type=int, default=None,
                         help='End task index (exclusive)')
+    parser.add_argument('--max-retries', type=int, default=0,
+                        help='Maximum number of retries for failed tasks')
+    parser.add_argument('--retry-delay', type=int, default=5,
+                        help='Retry delay in seconds between attempts')
     
     args = parser.parse_args()
     
@@ -826,7 +966,9 @@ if __name__ == '__main__':
             eval_model=eval_model,
             max_parallel=args.max_parallel,
             headless=args.headless,
-            max_steps=args.max_steps
+            max_steps=args.max_steps,
+            max_retries=args.max_retries,
+            retry_delay=args.retry_delay
         )
         
         # Save results
@@ -836,6 +978,10 @@ if __name__ == '__main__':
         with open(results_file, 'w') as f:
             json.dump(results, f, indent=2, default=str)
         
+        # Save retry statistics if any retries were performed
+        task_runner = WebArenaTaskRunner(llm, WebArenaEvaluator(eval_model), args.headless, args.max_steps)
+        retry_stats = await task_runner._save_retry_statistics(results['results'], timestamp)
+        
         # Print summary
         summary = results['summary']
         print(f"\n=== WebArena Evaluation Results ===")
@@ -844,6 +990,16 @@ if __name__ == '__main__':
         print(f"Failed: {summary['failed_tasks']}")
         print(f"Success rate: {summary['success_rate']:.2%}")
         print(f"Average score: {summary['average_score']:.3f}")
+
+        # Show retry statistics if any retries were performed
+        if summary['total_retries'] > 0:
+            print(f"\n=== Retry Statistics ===")
+            print(f"Total retries: {summary['total_retries']}")
+            print(f"Total retry attempts: {summary['total_retry_attempts']}")
+            print(f"Successful retries: {summary['successful_retries']}")
+            print(f"Retry success rate: {summary['retry_success_rate']:.2%}")
+            print(f"Retry statistics saved to: saved_trajectories/webarena/retry_stats/retry_stats_{timestamp}.json")
+        
         print(f"Results saved to: {results_file}")
     
     # Run the evaluation
