@@ -507,18 +507,35 @@ Explain the content of the page and that the requested information is not availa
 			"""
 			(a) Use browser._scroll_container for container-aware scrolling.
 			(b) If that JavaScript throws, fall back to window.scrollBy().
+			(c) Check if we've reached the end of the page and provide feedback.
 			"""
 			page = await browser_session.get_current_page()
+			
+			# Get current scroll position and page info
+			scroll_info = await page.evaluate("""() => {
+				return {
+					scrollY: window.scrollY,
+					viewportHeight: window.innerHeight,
+					totalHeight: document.documentElement.scrollHeight,
+					pixelsBelow: document.documentElement.scrollHeight - (window.scrollY + window.innerHeight)
+				};
+			}""")
+			
 			if params.amount:
 				dy = params.amount
 			else:
-				# Get window height with retries
-				dy_result, action_result = await retry_async_function(
-					lambda: page.evaluate('() => window.innerHeight'), 'Scroll down failed due to an error.'
+				# Use one page height as default (more conservative)
+				dy = scroll_info['viewportHeight']
+
+			# Check if we're already at the bottom
+			if scroll_info['pixelsBelow'] <= 0:
+				msg = 'Already at the bottom of the page - no more content to scroll to'
+				logger.info(msg)
+				return ActionResult(
+					extracted_content=msg, 
+					include_in_memory=True, 
+					long_term_memory='Reached end of page - no more content below'
 				)
-				if action_result:
-					return action_result
-				dy = dy_result
 
 			try:
 				await browser_session._scroll_container(cast(int, dy))
@@ -527,11 +544,28 @@ Explain the content of the page and that the requested information is not availa
 				await page.evaluate('(y) => window.scrollBy(0, y)', dy)
 				logger.debug('Smart scroll failed; used window.scrollBy fallback', exc_info=e)
 
+			# Check if we've reached the bottom after scrolling
+			new_scroll_info = await page.evaluate("""() => {
+				return {
+					scrollY: window.scrollY,
+					pixelsBelow: document.documentElement.scrollHeight - (window.scrollY + window.innerHeight)
+				};
+			}""")
+			
 			amount_str = f'{params.amount} pixels' if params.amount is not None else 'one page'
 			msg = f'🔍 Scrolled down the page by {amount_str}'
+			
+			# Add feedback about remaining content
+			if new_scroll_info['pixelsBelow'] <= 0:
+				msg += ' - reached the end of the page'
+			elif new_scroll_info['pixelsBelow'] < 200:
+				msg += f' - only {new_scroll_info["pixelsBelow"]}px remaining below'
+			
 			logger.info(msg)
 			return ActionResult(
-				extracted_content=msg, include_in_memory=True, long_term_memory=f'Scrolled down the page by {amount_str}'
+				extracted_content=msg, 
+				include_in_memory=True, 
+				long_term_memory=f'Scrolled down by {amount_str}, {new_scroll_info["pixelsBelow"]}px remaining below'
 			)
 
 		@self.registry.action(
@@ -540,16 +574,31 @@ Explain the content of the page and that the requested information is not availa
 		)
 		async def scroll_up(params: ScrollAction, browser_session: BrowserSession):
 			page = await browser_session.get_current_page()
+			
+			# Get current scroll position
+			scroll_info = await page.evaluate("""() => {
+				return {
+					scrollY: window.scrollY,
+					viewportHeight: window.innerHeight,
+					pixelsAbove: window.scrollY
+				};
+			}""")
+			
 			if params.amount:
 				dy = -(params.amount)
 			else:
-				# Get window height with retries
-				dy_result, action_result = await retry_async_function(
-					lambda: page.evaluate('() => window.innerHeight'), 'Scroll up failed due to an error.'
+				# Use one page height as default
+				dy = -(scroll_info['viewportHeight'])
+
+			# Check if we're already at the top
+			if scroll_info['pixelsAbove'] <= 0:
+				msg = 'Already at the top of the page - no more content to scroll to'
+				logger.info(msg)
+				return ActionResult(
+					extracted_content=msg, 
+					include_in_memory=True, 
+					long_term_memory='Reached top of page - no more content above'
 				)
-				if action_result:
-					return action_result
-				dy = -(dy_result or 0)
 
 			try:
 				await browser_session._scroll_container(dy)
@@ -557,11 +606,74 @@ Explain the content of the page and that the requested information is not availa
 				await page.evaluate('(y) => window.scrollBy(0, y)', dy)
 				logger.debug('Smart scroll failed; used window.scrollBy fallback', exc_info=e)
 
+			# Check new scroll position
+			new_scroll_info = await page.evaluate("""() => {
+				return {
+					scrollY: window.scrollY,
+					pixelsAbove: window.scrollY
+				};
+			}""")
+			
 			amount_str = f'{params.amount} pixels' if params.amount is not None else 'one page'
 			msg = f'🔍 Scrolled up the page by {amount_str}'
+			
+			# Add feedback about remaining content
+			if new_scroll_info['pixelsAbove'] <= 0:
+				msg += ' - reached the top of the page'
+			elif new_scroll_info['pixelsAbove'] < 200:
+				msg += f' - only {new_scroll_info["pixelsAbove"]}px remaining above'
+			
 			logger.info(msg)
 			return ActionResult(
-				extracted_content=msg, include_in_memory=True, long_term_memory=f'Scrolled up the page by{amount_str}'
+				extracted_content=msg, 
+				include_in_memory=True, 
+				long_term_memory=f'Scrolled up by {amount_str}, {new_scroll_info["pixelsAbove"]}px remaining above'
+			)
+
+		@self.registry.action(
+			'Scroll back up to check for missed content - useful when you reach the end of the page',
+		)
+		async def scroll_back_to_check(browser_session: BrowserSession):
+			"""
+			Scroll back up by one page to check for content that might have been missed.
+			Useful when the agent has scrolled to the bottom and wants to review previous content.
+			"""
+			page = await browser_session.get_current_page()
+			
+			# Get current scroll position
+			scroll_info = await page.evaluate("""() => {
+				return {
+					scrollY: window.scrollY,
+					viewportHeight: window.innerHeight,
+					pixelsAbove: window.scrollY
+				};
+			}""")
+			
+			# Scroll up by one page
+			dy = -(scroll_info['viewportHeight'])
+			
+			# Check if we can scroll up
+			if scroll_info['pixelsAbove'] <= 0:
+				msg = 'Already at the top of the page - cannot scroll back up'
+				logger.info(msg)
+				return ActionResult(
+					extracted_content=msg, 
+					include_in_memory=True, 
+					long_term_memory='Cannot scroll back up - already at top'
+				)
+
+			try:
+				await browser_session._scroll_container(dy)
+			except Exception as e:
+				await page.evaluate('(y) => window.scrollBy(0, y)', dy)
+				logger.debug('Scroll back failed; used window.scrollBy fallback', exc_info=e)
+
+			msg = f'🔍 Scrolled back up by one page to check for missed content'
+			logger.info(msg)
+			return ActionResult(
+				extracted_content=msg, 
+				include_in_memory=True, 
+				long_term_memory='Scrolled back up to review previous content'
 			)
 
 		# send keys

@@ -51,7 +51,6 @@ import anyio
 from dotenv import load_dotenv
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.messages import SystemMessage, UserMessage
-
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserSession, BrowserProfile
 from browser_use.agent.views import AgentHistoryList
@@ -591,7 +590,7 @@ class WebArenaTaskRunner:
             # Configure memory interval to prevent information loss
             memory_config = MemoryConfig(
                 agent_id=f"webarena_agent_{task.task_id}",
-                memory_interval=20,
+                memory_interval=10,
                 llm_instance=self.llm
             )
             
@@ -782,7 +781,7 @@ async def run_webarena_evaluation(
             logger.info(f"No failed tasks to retry after attempt {retry_attempt - 1}")
             break
             
-        logger.info(f"Retry attempt {retry_attempt}/{max_retries}: Retrying {len(failed_tasks)} failed tasks")
+        logger.info(f"Retry attempt {retry_attempt}/{max_retries}: Retrying {len(failed_tasks)} failed task(s)")
         
         # Wait before retry
         if retry_delay > 0:
@@ -1003,4 +1002,4 @@ if __name__ == '__main__':
         print(f"Results saved to: {results_file}")
     
     # Run the evaluation
-    asyncio.run(main()) 
+    asyncio.run(main())
