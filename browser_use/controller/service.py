@@ -308,7 +308,7 @@ class Controller(Generic[Context]):
 			)
 
 		@self.registry.action(
-			'SEARCH WITHIN WEBSITE - Use this action for ALL search tasks instead of input_text. Searches for a term in the website search box with fuzzy search support (tries exact search first, then falls back to first keyword if no results). This is the preferred action for searching products, users, issues, or any content within a website.',
+			'SEARCH WITHIN WEBSITE - Use this action for ALL search tasks instead of input_text. Always performs a fresh search by clearing any existing filters first, then searches for a term in the website search box with fuzzy search support (tries exact search first, then falls back to first keyword if no results). This is the preferred action for searching products, users, issues, or any content within a website.',
 			param_model=SearchWithinWebsiteAction,
 		)
 		async def search_within_website(params: SearchWithinWebsiteAction, browser_session: BrowserSession, page_extraction_llm: BaseChatModel):
@@ -330,6 +330,49 @@ class Controller(Generic[Context]):
 			# Get current page early for consistent access
 			page = await browser_session.get_current_page()
 			logger.info(f"🔍 Current page URL: {page.url}")
+			
+			# Clear any existing search filters before performing fresh search
+			logger.info("🔍 Checking for and clearing existing search filters")
+			try:
+				# Common selectors for filter clearing elements
+				clear_selectors = [
+					'[data-testid*="clear"]', '[data-testid*="reset"]', '[aria-label*="clear"]', '[aria-label*="reset"]',
+					'[title*="clear"]', '[title*="reset"]', '.clear-filters', '.reset-filters', '.filter-clear', '.filter-reset',
+					'button[class*="clear"]', 'button[class*="reset"]', 'a[class*="clear"]', 'a[class*="reset"]'
+				]
+				
+				# Try to find and click clear/reset buttons
+				for selector in clear_selectors:
+					try:
+						elements = await page.query_selector_all(selector)
+						for element in elements:
+							text = await element.text_content()
+							if text and any(keyword in text.lower() for keyword in ['clear', 'reset', 'remove', 'x', '×']):
+								logger.info(f"🔍 Found filter clear button: {text}")
+								await element.click()
+								await page.wait_for_load_state(state='domcontentloaded', timeout=3000)
+								logger.info("🔍 Successfully cleared filters")
+								break
+					except Exception:
+						continue
+				
+				# Try to clear search input field if it has existing content
+				try:
+					search_inputs = await page.query_selector_all('input[type="search"], input[placeholder*="search"], input[name*="search"], input[id*="search"]')
+					for input_elem in search_inputs:
+						value = await input_elem.input_value()
+						if value and value.strip():
+							logger.info(f"🔍 Clearing existing search input: '{value}'")
+							await input_elem.fill('')
+							await input_elem.press('Enter')
+							await page.wait_for_load_state(state='domcontentloaded', timeout=3000)
+							logger.info("🔍 Successfully cleared search input")
+							break
+				except Exception:
+					pass
+					
+			except Exception as e:
+				logger.warning(f"🔍 Error while clearing filters: {e}")
 			
 			# First try exact search
 			element_node = await browser_session.get_dom_element_by_index(params.search_input_index)

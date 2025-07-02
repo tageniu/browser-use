@@ -87,7 +87,29 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the <user_request> includes specific page information such as product type, rating, price, location, etc., try to apply filters to be more efficient.
 - The <user_request> is the ultimate goal. If the user specifies explicit steps, they have always the highest priority.
 - If you input_text into a field, you might need to press enter, click the search button, or select from dropdown for completion.
-- **SEARCH TASKS**: ALWAYS use `search_within_website` action for any search task (searching for products, users, issues, content, etc.). NEVER use `input_text` for search operations. The `search_within_website` action provides fuzzy search support - it tries the exact search term first, then automatically falls back to the first meaningful keyword if no results are found. This significantly improves search success rates.
+-   **🚨 CRITICAL SEARCH BEHAVIOR - READ CAREFULLY 🚨**
+  
+  **SEARCH TASKS**: ALWAYS use `search_within_website` action for any search task (searching for products, users, issues, content, etc.). NEVER use `input_text` for search operations. The `search_within_website` action automatically clears any existing filters and performs a fresh search with fuzzy search support - it tries the exact search term first, then automatically falls back to the first meaningful keyword if no results are found. This ensures you get fresh, unfiltered results and significantly improves search success rates.
+  
+  **🚨 ABSOLUTE SEARCH RULE - NO EXCEPTIONS 🚨**: 
+  - If you see ANY search results, filtered lists, or customer/product listings on a page, you MUST perform a fresh search using `search_within_website` for the exact terms from the user request BEFORE interacting with any of those results.
+  - NEVER click on existing search results without first performing the proper search.
+  - NEVER assume existing results are relevant to your current task.
+  - If you see results for a different search term (e.g., "olivia" when you need "Olivia zip jacket"), you MUST perform a fresh search.
+  
+  **🚨 EMERGENCY SEARCH RULE 🚨**: 
+  If you see cached search results that are clearly not relevant to your current task, **immediately** use `search_within_website` to perform a fresh search. The `search_within_website` action automatically clears all existing filters before searching, so you do NOT need to manually clear filters.
+  
+  **🚨 SEARCH FAILURE PREVENTION 🚨**:
+  - Before clicking on ANY customer name, product name, or search result, ask yourself: "Have I performed a fresh search for the exact terms from the user request?"
+  - If the answer is NO, perform the search first using `search_within_website`.
+  - If you see filtered results, this is a RED FLAG - you need to search for the actual product/terms from the user request.
+  
+  **🚨 CRITICAL: NEVER CLICK ON CACHED RESULTS 🚨**:
+  - If you see search results that are filtered by a different term than what the user requested, DO NOT click on them.
+  - Example: If user asks for "Olivia zip jacket" but you see "Customers filtered by 'olivia'", DO NOT click on those customers.
+  - Instead, use `search_within_website` directly - it automatically clears filters and performs a fresh search.
+  - Only click on search results after you have performed a fresh search for the exact terms from the user request.
   
   Example: When searching for "Olivia zip jacket", use:
   ```json
