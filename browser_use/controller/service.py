@@ -24,6 +24,7 @@ from browser_use.controller.views import (
 	Position,
 	ScrollAction,
 	SearchGoogleAction,
+	SearchWithinWebsiteAction,
 	SendKeysAction,
 	SwitchTabAction,
 )
@@ -305,6 +306,150 @@ class Controller(Generic[Context]):
 				include_in_memory=True,
 				long_term_memory=f"Input '{params.text}' into element {params.index}.",
 			)
+
+		@self.registry.action(
+			'SEARCH WITHIN WEBSITE - Use this action for ALL search tasks instead of input_text. Searches for a term in the website search box with fuzzy search support (tries exact search first, then falls back to first keyword if no results). This is the preferred action for searching products, users, issues, or any content within a website.',
+			param_model=SearchWithinWebsiteAction,
+		)
+		async def search_within_website(params: SearchWithinWebsiteAction, browser_session: BrowserSession, page_extraction_llm: BaseChatModel):
+			"""
+			Enhanced search functionality that supports fuzzy search within websites.
+			
+			params:
+				search_query: The search term to look for
+				search_input_index: Index of the search input field
+				submit_button_index: Optional index of submit button (if None, will try Enter key)
+				browser_session: Browser session instance
+			"""
+			import re
+			from browser_use.llm.messages import UserMessage
+
+			original_query = params.search_query.strip()
+			logger.info(f"🔍 Starting search_within_website for query: '{original_query}' with input_index={params.search_input_index}, submit_index={params.submit_button_index}")
+			
+			# Get current page early for consistent access
+			page = await browser_session.get_current_page()
+			logger.info(f"🔍 Current page URL: {page.url}")
+			
+			# First try exact search
+			element_node = await browser_session.get_dom_element_by_index(params.search_input_index)
+			if element_node is None:
+				error_msg = f'Search input element with index {params.search_input_index} does not exist'
+				logger.error(f"🔍 {error_msg}")
+				return ActionResult(error=error_msg)
+
+			logger.info(f"🔍 Found search input element at index {params.search_input_index}")
+
+			try:
+				# Input the exact search query
+				logger.info(f"🔍 Inputting exact search query: '{original_query}'")
+				await browser_session._input_text_element_node(element_node, original_query)
+				
+				# Submit the search
+				if params.submit_button_index is not None:
+					# Click submit button
+					logger.info(f"🔍 Clicking submit button at index {params.submit_button_index}")
+					submit_element = await browser_session.get_dom_element_by_index(params.submit_button_index)
+					if submit_element:
+						await browser_session._click_element_node(submit_element)
+						logger.info("🔍 Successfully clicked submit button")
+					else:
+						logger.warning(f"🔍 Submit button at index {params.submit_button_index} not found, falling back to Enter key")
+						await page.keyboard.press('Enter')
+				else:
+					# Try pressing Enter
+					logger.info("🔍 Using Enter key to submit search")
+					await page.keyboard.press('Enter')
+				
+				# Wait for page to load
+				logger.info("🔍 Waiting for page to load after search submission")
+				await page.wait_for_load_state(state='domcontentloaded', timeout=5000)
+				page = await browser_session.get_current_page()
+				logger.info(f"🔍 Page loaded, new URL: {page.url}")
+				
+				page_content = await page.content()
+				logger.info(f"🔍 Retrieved page content, length: {len(page_content)} characters")
+
+				# Let the LLM decide if the search yielded no results
+				logger.info("🔍 Asking LLM to check if search returned no results")
+				prompt = (
+					f"You are given the HTML content of a web page after searching for '{original_query}'. "
+					f"Does this page indicate that the search for '{original_query}' returned no results? "
+					f"Answer with ONLY 'YES' if no results found, or 'NO' if results were found. Do not include any other text.\n\nPAGE CONTENT:\n" + page_content[:5000]  # limit for context
+				)
+				llm_response = await page_extraction_llm.ainvoke([UserMessage(content=prompt)])
+				llm_text = llm_response.completion if hasattr(llm_response, 'completion') else str(llm_response)
+				logger.info(f"🔍 LLM no-results check response: {llm_text}")
+				
+				# More robust parsing of LLM response
+				llm_text_clean = llm_text.strip().lower()
+				is_no_results = (
+					llm_text_clean.startswith('yes') or 
+					'**answer: yes**' in llm_text_clean or
+					'answer: yes' in llm_text_clean or
+					'**yes**' in llm_text_clean
+				)
+				logger.info(f"🔍 LLM determined no results: {is_no_results} (parsed from: '{llm_text_clean}')")
+
+				# If LLM says no results, try with first keyword
+				if is_no_results:
+					logger.info("🔍 LLM indicated no results, attempting fuzzy search with first keyword")
+					words = re.findall(r'\b\w+\b', original_query.lower())
+					common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them'}
+					
+					first_keyword = None
+					for word in words:
+						if word not in common_words and len(word) > 2:
+							first_keyword = word
+							break
+					
+					logger.info(f"🔍 Extracted first keyword: '{first_keyword}' from query: '{original_query}'")
+					
+					if first_keyword and first_keyword != original_query.lower():
+						logger.info(f"🔍 Attempting fuzzy search with keyword: '{first_keyword}'")
+						# Clear the search field and try with first keyword
+						await browser_session._input_text_element_node(element_node, first_keyword)
+						
+						# Submit the fuzzy search
+						if params.submit_button_index is not None:
+							logger.info(f"🔍 Submitting fuzzy search via submit button")
+							submit_element = await browser_session.get_dom_element_by_index(params.submit_button_index)
+							if submit_element:
+								await browser_session._click_element_node(submit_element)
+							else:
+								logger.warning("🔍 Submit button not found for fuzzy search, using Enter key")
+								await page.keyboard.press('Enter')
+						else:
+							logger.info("🔍 Submitting fuzzy search via Enter key")
+							await page.keyboard.press('Enter')
+						
+						# Wait for page to load
+						logger.info("🔍 Waiting for page to load after fuzzy search")
+						await page.wait_for_load_state(state='domcontentloaded', timeout=5000)
+						page = await browser_session.get_current_page()
+						logger.info(f"🔍 Fuzzy search completed, final URL: {page.url}")
+						
+						msg = f'🔍 Searched for "{original_query}" (exact) - LLM indicated no results; then searched for "{first_keyword}" (fuzzy) within website.'
+						logger.info(msg)
+						return ActionResult(
+							extracted_content=msg,
+							include_in_memory=True,
+							long_term_memory=f"Searched website for '{original_query}' (exact), then '{first_keyword}' (fuzzy) due to no results"
+						)
+					else:
+						logger.info("🔍 No suitable keyword found for fuzzy search, proceeding with original results")
+				
+				msg = f'🔍 Searched for "{original_query}" within website'
+				logger.info(msg)
+				return ActionResult(
+					extracted_content=msg, include_in_memory=True, long_term_memory=f"Searched website for '{original_query}'"
+				)
+				
+			except Exception as e:
+				error_msg = f'Failed to search within website: {str(e)}'
+				logger.error(f"🔍 {error_msg}")
+				logger.exception("🔍 Full exception details:")
+				return ActionResult(error=error_msg)
 
 		# Save PDF
 		@self.registry.action('Save the current page as a PDF file')

@@ -6,6 +6,12 @@ class SearchGoogleAction(BaseModel):
 	query: str
 
 
+class SearchWithinWebsiteAction(BaseModel):
+	search_query: str
+	search_input_index: int
+	submit_button_index: int | None = None
+
+
 class GoToUrlAction(BaseModel):
 	url: str
 

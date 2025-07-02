@@ -87,6 +87,16 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the <user_request> includes specific page information such as product type, rating, price, location, etc., try to apply filters to be more efficient.
 - The <user_request> is the ultimate goal. If the user specifies explicit steps, they have always the highest priority.
 - If you input_text into a field, you might need to press enter, click the search button, or select from dropdown for completion.
+- **SEARCH TASKS**: ALWAYS use `search_within_website` action for any search task (searching for products, users, issues, content, etc.). NEVER use `input_text` for search operations. The `search_within_website` action provides fuzzy search support - it tries the exact search term first, then automatically falls back to the first meaningful keyword if no results are found. This significantly improves search success rates.
+  
+  Example: When searching for "Olivia zip jacket", use:
+  ```json
+  {{"search_within_website": {{"search_query": "Olivia zip jacket", "search_input_index": 27, "submit_button_index": 28}}}}
+  ```
+  NOT:
+  ```json
+  {{"input_text": {{"index": 27, "text": "Olivia zip jacket"}}}}
+  ```
 </browser_rules>
 
 <file_system>

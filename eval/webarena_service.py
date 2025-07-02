@@ -4,7 +4,8 @@
 # python eval/webarena_service.py --model gpt-o4-mini --eval-model gpt-o4-mini --start 812 --end 813 --max-steps 15 --max-retries 1
 # python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 812 --end 813 --max-steps 15 --max-retries 1
 # =========================================================================================================================
-# python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --start 114 --end 115 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 113 --end 114 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 114 --end 115 --max-steps 15 --max-retries 1
 
 # Reddit
 # python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --start 69 --end 70 --max-steps 15
