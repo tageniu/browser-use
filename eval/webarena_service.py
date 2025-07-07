@@ -1072,10 +1072,41 @@ class WebArenaTaskRunner:
         
         return final_context
 
+    async def _clear_previous_history(self, task_id: str):
+        """Clear previous history files for a given task to ensure clean runs"""
+        history_dir = Path("saved_trajectories/webarena/agent_history")
+        
+        if not history_dir.exists():
+            logger.info(f"No history directory found for task {task_id} - nothing to clear")
+            return
+        
+        # Find all history files for this task (including retry attempts)
+        history_files = list(history_dir.glob(f"{task_id}_history*.json"))
+        
+        if not history_files:
+            logger.info(f"No previous history files found for task {task_id}")
+            return
+        
+        logger.info(f"Clearing {len(history_files)} previous history files for task {task_id}")
+        
+        for history_file in history_files:
+            try:
+                history_file.unlink()
+                logger.info(f"Deleted previous history file: {history_file.name}")
+            except Exception as e:
+                logger.error(f"Failed to delete history file {history_file}: {e}")
+        
+        logger.info(f"Completed clearing previous history files for task {task_id}")
+
     async def run_task(self, task: WebArenaTask, retry_info: Optional[Dict] = None) -> Dict:
         """Run a single WebArena task"""
         logger.info(f"Starting WebArena task: {task.task_id}")
-        if retry_info:
+        
+        # Clear previous history files unless this is a retry attempt
+        if not retry_info:
+            logger.info(f"Clearing previous history files for task {task.task_id}")
+            await self._clear_previous_history(task.task_id)
+        else:
             logger.info(f"Retry attempt {retry_info.get('retry_attempt', 1)} for task {task.task_id}")
         logger.info(f"Task intent: {task.intent}")
         logger.info(f"Start URL: {task.start_url}")
