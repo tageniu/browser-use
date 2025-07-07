@@ -4,8 +4,8 @@
 # python eval/webarena_service.py --model gpt-o4-mini --eval-model gpt-o4-mini --start 812 --end 813 --max-steps 15 --max-retries 1
 # python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 812 --end 813 --max-steps 15 --max-retries 1
 # =========================================================================================================================
-# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 113 --end 114 --max-steps 15 --max-retries 1
-# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 114 --end 115 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 113 --end 114 --max-steps 15 --max-retries 2
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --start 114 --end 115 --max-steps 15 --max-retries 2
 
 # Reddit
 # python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --start 69 --end 70 --max-steps 15
@@ -551,6 +551,527 @@ class WebArenaTaskRunner:
         self.max_steps = max_steps
         self.active_sessions = {}  # Track active browser sessions
     
+    async def _load_previous_attempts(self, task_id: str) -> List[Dict]:
+        """Load previous attempt histories for a given task"""
+        previous_attempts = []
+        
+        # Check for previous history files
+        history_dir = Path("saved_trajectories/webarena/agent_history")
+        results_dir = Path("saved_trajectories/webarena")
+        
+        if not history_dir.exists():
+            logger.info(f"No history directory found for task {task_id}")
+            return previous_attempts
+            
+        # Look for history files for this task (including retry attempts)
+        history_files = list(history_dir.glob(f"{task_id}_history*.json"))
+        logger.info(f"Found {len(history_files)} history files for task {task_id}: {[f.name for f in history_files]}")
+        
+        for history_file in history_files:
+            try:
+                logger.info(f"Loading history file: {history_file}")
+                async with await anyio.open_file(history_file, 'r') as f:
+                    history_data = json.loads(await f.read())
+                    
+                # Extract key information from the history
+                attempt_info = {
+                    'file': history_file.name,
+                    'steps': len(history_data.get('history', [])),
+                    'actions': [],
+                    'memory_entries': [],
+                    'thinking_entries': [],
+                    'evaluation_entries': [],
+                    'final_state': None,
+                    'errors': [],
+                    'urls_visited': [],
+                    'final_result': None,
+                    'evaluator_feedback': None
+                }
+                
+                logger.info(f"Processing {attempt_info['steps']} steps from {history_file.name}")
+                
+                # Extract actions and other important info from each step
+                for step_idx, step in enumerate(history_data.get('history', [])):
+                    logger.debug(f"Processing step {step_idx + 1}/{attempt_info['steps']}")
+                    
+                    # Extract actions
+                    if step.get('model_output') and step['model_output'].get('action'):
+                        for action in step['model_output']['action']:
+                            if action:
+                                action_str = self._format_action_from_dict(action)
+                                if action_str:
+                                    attempt_info['actions'].append(action_str)
+                    
+                    # Extract memory entries
+                    if step.get('model_output') and step['model_output'].get('memory'):
+                        memory = step['model_output']['memory']
+                        if memory and memory.strip():
+                            attempt_info['memory_entries'].append({
+                                'step': step_idx + 1,
+                                'memory': memory
+                            })
+                            logger.debug(f"Step {step_idx + 1} memory: {memory[:100]}...")
+                    
+                    # Extract thinking entries
+                    if step.get('model_output') and step['model_output'].get('thinking'):
+                        thinking = step['model_output']['thinking']
+                        if thinking and thinking.strip():
+                            attempt_info['thinking_entries'].append({
+                                'step': step_idx + 1,
+                                'thinking': thinking
+                            })
+                            logger.debug(f"Step {step_idx + 1} thinking: {thinking[:100]}...")
+                    
+                    # Extract evaluation entries
+                    if step.get('model_output') and step['model_output'].get('evaluation_previous_goal'):
+                        evaluation = step['model_output']['evaluation_previous_goal']
+                        if evaluation and evaluation.strip():
+                            attempt_info['evaluation_entries'].append({
+                                'step': step_idx + 1,
+                                'evaluation': evaluation
+                            })
+                            logger.debug(f"Step {step_idx + 1} evaluation: {evaluation[:100]}...")
+                    
+                    # Extract URLs visited
+                    if step.get('state') and step['state'].get('url'):
+                        url = step['state']['url']
+                        if url and url not in attempt_info['urls_visited']:
+                            attempt_info['urls_visited'].append(url)
+                    
+                    # Check for errors in results
+                    if step.get('result'):
+                        for result in step['result']:
+                            if result.get('error'):
+                                attempt_info['errors'].append({
+                                    'step': step_idx + 1,
+                                    'error': result['error']
+                                })
+                                logger.debug(f"Step {step_idx + 1} error: {result['error']}")
+                            
+                            # Extract final result if this is a done action
+                            if result.get('is_done') and result.get('extracted_content'):
+                                attempt_info['final_result'] = result['extracted_content']
+                                logger.info(f"Found final result in step {step_idx + 1}: {result['extracted_content'][:200]}...")
+                
+                # Get final state
+                if history_data.get('history'):
+                    final_step = history_data['history'][-1]
+                    if final_step.get('state'):
+                        attempt_info['final_state'] = {
+                            'url': final_step['state'].get('url'),
+                            'title': final_step['state'].get('title')
+                        }
+                        logger.info(f"Final state: {attempt_info['final_state']}")
+                
+                # Load evaluator feedback from result file
+                result_file = results_dir / f"{task_id}.json"
+                if result_file.exists():
+                    try:
+                        async with await anyio.open_file(result_file, 'r') as f:
+                            result_data = json.loads(await f.read())
+                        
+                        # Extract evaluation information
+                        if 'evaluation' in result_data:
+                            evaluation_data = result_data['evaluation']
+                            attempt_info['evaluator_feedback'] = {
+                                'success': evaluation_data.get('success', False),
+                                'score': evaluation_data.get('score', 0.0),
+                                'reasoning': evaluation_data.get('reasoning', ''),
+                                'functional_correctness': evaluation_data.get('functional_correctness', False),
+                                'error': evaluation_data.get('error')
+                            }
+                            logger.info(f"Loaded evaluator feedback: success={evaluation_data.get('success')}, score={evaluation_data.get('score')}")
+                            logger.debug(f"Evaluator reasoning: {evaluation_data.get('reasoning', '')[:200]}...")
+                        else:
+                            logger.warning(f"No evaluation data found in result file for task {task_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to load evaluator feedback from result file {result_file}: {e}")
+                else:
+                    logger.info(f"No result file found for task {task_id}")
+                
+                # Log summary statistics
+                logger.info(f"Attempt summary for {history_file.name}:")
+                logger.info(f"  • Steps: {attempt_info['steps']}")
+                logger.info(f"  • Actions: {len(attempt_info['actions'])}")
+                logger.info(f"  • Memory entries: {len(attempt_info['memory_entries'])}")
+                logger.info(f"  • Thinking entries: {len(attempt_info['thinking_entries'])}")
+                logger.info(f"  • Evaluation entries: {len(attempt_info['evaluation_entries'])}")
+                logger.info(f"  • URLs visited: {len(attempt_info['urls_visited'])}")
+                logger.info(f"  • Errors: {len(attempt_info['errors'])}")
+                logger.info(f"  • Final result: {'Yes' if attempt_info['final_result'] else 'No'}")
+                logger.info(f"  • Evaluator feedback: {'Yes' if attempt_info['evaluator_feedback'] else 'No'}")
+                
+                previous_attempts.append(attempt_info)
+                
+            except Exception as e:
+                logger.error(f"Failed to load history file {history_file}: {e}", exc_info=True)
+        
+        logger.info(f"Successfully loaded {len(previous_attempts)} previous attempts for task {task_id}")
+        return previous_attempts
+    
+    def _format_action_from_dict(self, action_dict: Dict) -> str:
+        """Format action dictionary into readable string"""
+        if not action_dict:
+            return ""
+            
+        for action_type, action_data in action_dict.items():
+            if action_data is not None:
+                if isinstance(action_data, dict):
+                    if 'url' in action_data:
+                        return f"{action_type}: {action_data['url']}"
+                    elif 'index' in action_data:
+                        return f"{action_type}: index {action_data['index']}"
+                    elif 'text' in action_data:
+                        return f"{action_type}: {action_data['text']}"
+                    else:
+                        return f"{action_type}: {action_data}"
+                else:
+                    return f"{action_type}: {action_data}"
+        
+        return str(action_dict)
+    
+    def _build_retry_context(self, task: WebArenaTask, previous_attempts: List[Dict], retry_info: Dict) -> str:
+        """Build context from previous attempts to help guide the retry"""
+        if not previous_attempts:
+            logger.info("No previous attempts found, skipping retry context generation")
+            return ""
+        
+        logger.info(f"Building retry context for {len(previous_attempts)} previous attempts")
+        
+        context_parts = [
+            f"⚠️  RETRY ATTEMPT {retry_info.get('retry_attempt', 1)}: This is a retry of a failed task.",
+            f"Previous failure reason: {retry_info.get('original_failure_reason', 'Unknown')}",
+            "",
+            "📋 PREVIOUS ATTEMPTS SUMMARY:"
+        ]
+        
+        # Analyze patterns across attempts
+        stuck_patterns = []
+        common_actions = []
+        final_urls = []
+        memory_patterns = []
+        thinking_patterns = []
+        evaluation_patterns = []
+        evaluator_feedback_patterns = []
+        
+        for i, attempt in enumerate(previous_attempts, 1):
+            logger.info(f"Analyzing attempt {i}: {attempt['file']}")
+            
+            context_parts.append(f"\nAttempt {i} ({attempt['file']}):")
+            context_parts.append(f"  • Steps taken: {attempt['steps']}")
+            
+            if attempt['final_state']:
+                final_url = attempt['final_state']['url']
+                final_urls.append(final_url)
+                context_parts.append(f"  • Final state: {final_url}")
+                logger.debug(f"Attempt {i} final URL: {final_url}")
+            
+            if attempt['errors']:
+                error_summary = f"  • Errors encountered: {len(attempt['errors'])} errors"
+                context_parts.append(error_summary)
+                logger.debug(f"Attempt {i} errors: {[e['error'][:50] + '...' for e in attempt['errors'][:3]]}")
+            
+            # Show last few actions to indicate where it got stuck
+            if attempt['actions']:
+                last_actions = attempt['actions'][-5:]  # Last 5 actions
+                context_parts.append(f"  • Last actions: {' → '.join(last_actions)}")
+                logger.debug(f"Attempt {i} last actions: {last_actions}")
+                
+                # Track common actions for pattern analysis
+                common_actions.extend(last_actions)
+                
+                # Check for stuck patterns
+                if len(last_actions) >= 3:
+                    # Check if stuck in customer listing (common pattern)
+                    if any('customer' in action.lower() for action in last_actions[-3:]):
+                        stuck_patterns.append('customer_listing')
+                        logger.info(f"Attempt {i}: Detected customer listing pattern")
+                    # Check if stuck in search loops
+                    if any('search' in action.lower() for action in last_actions[-3:]):
+                        stuck_patterns.append('search_loops')
+                        logger.info(f"Attempt {i}: Detected search loop pattern")
+                    # Check if stuck clicking same elements
+                    if len(set(last_actions[-3:])) <= 1:
+                        stuck_patterns.append('repetitive_clicking')
+                        logger.info(f"Attempt {i}: Detected repetitive clicking pattern")
+            
+            # Analyze memory patterns
+            if attempt['memory_entries']:
+                context_parts.append(f"  • Memory entries: {len(attempt['memory_entries'])}")
+                # Extract key memory insights
+                for mem_entry in attempt['memory_entries'][-3:]:  # Last 3 memory entries
+                    memory_text = mem_entry['memory'].lower()
+                    if 'stuck' in memory_text or 'not found' in memory_text:
+                        memory_patterns.append('stuck_in_search')
+                        logger.debug(f"Attempt {i} memory indicates being stuck: {mem_entry['memory'][:100]}...")
+                    elif 'customer' in memory_text:
+                        memory_patterns.append('customer_focus')
+                        logger.debug(f"Attempt {i} memory focuses on customers: {mem_entry['memory'][:100]}...")
+            
+            # Analyze thinking patterns
+            if attempt['thinking_entries']:
+                context_parts.append(f"  • Thinking entries: {len(attempt['thinking_entries'])}")
+                # Extract key thinking insights
+                for think_entry in attempt['thinking_entries'][-2:]:  # Last 2 thinking entries
+                    thinking_text = think_entry['thinking'].lower()
+                    if 'need to try' in thinking_text or 'alternative' in thinking_text:
+                        thinking_patterns.append('seeking_alternatives')
+                        logger.debug(f"Attempt {i} thinking shows seeking alternatives: {think_entry['thinking'][:100]}...")
+                    elif 'stuck' in thinking_text or 'not working' in thinking_text:
+                        thinking_patterns.append('recognizing_failure')
+                        logger.debug(f"Attempt {i} thinking shows recognizing failure: {think_entry['thinking'][:100]}...")
+            
+            # Analyze evaluation patterns
+            if attempt['evaluation_entries']:
+                context_parts.append(f"  • Evaluation entries: {len(attempt['evaluation_entries'])}")
+                # Extract key evaluation insights
+                for eval_entry in attempt['evaluation_entries'][-2:]:  # Last 2 evaluation entries
+                    eval_text = eval_entry['evaluation'].lower()
+                    if 'partial' in eval_text or 'not complete' in eval_text:
+                        evaluation_patterns.append('partial_success')
+                        logger.debug(f"Attempt {i} evaluation shows partial success: {eval_entry['evaluation'][:100]}...")
+                    elif 'failed' in eval_text or 'unsuccessful' in eval_text:
+                        evaluation_patterns.append('recognized_failure')
+                        logger.debug(f"Attempt {i} evaluation shows recognized failure: {eval_entry['evaluation'][:100]}...")
+            
+            # Analyze evaluator feedback
+            if attempt['evaluator_feedback']:
+                feedback = attempt['evaluator_feedback']
+                context_parts.append(f"  • Evaluator feedback: Success={feedback['success']}, Score={feedback['score']}")
+                logger.info(f"Attempt {i} evaluator feedback: success={feedback['success']}, score={feedback['score']}")
+                
+                # Extract key insights from evaluator reasoning
+                reasoning_text = feedback['reasoning'].lower()
+                if 'wrong page' in reasoning_text or 'incorrect page' in reasoning_text:
+                    evaluator_feedback_patterns.append('wrong_page')
+                    logger.debug(f"Attempt {i} evaluator indicates wrong page: {feedback['reasoning'][:100]}...")
+                elif 'not found' in reasoning_text or 'missing' in reasoning_text:
+                    evaluator_feedback_patterns.append('information_not_found')
+                    logger.debug(f"Attempt {i} evaluator indicates information not found: {feedback['reasoning'][:100]}...")
+                elif 'incomplete' in reasoning_text or 'partial' in reasoning_text:
+                    evaluator_feedback_patterns.append('incomplete_task')
+                    logger.debug(f"Attempt {i} evaluator indicates incomplete task: {feedback['reasoning'][:100]}...")
+                elif 'navigation' in reasoning_text or 'navigation failed' in reasoning_text:
+                    evaluator_feedback_patterns.append('navigation_failure')
+                    logger.debug(f"Attempt {i} evaluator indicates navigation failure: {feedback['reasoning'][:100]}...")
+                
+                # Show evaluator reasoning
+                context_parts.append(f"  • Evaluator reasoning: {feedback['reasoning'][:200]}...")
+                logger.debug(f"Attempt {i} full evaluator reasoning: {feedback['reasoning']}")
+            
+            # Show URLs visited
+            if attempt['urls_visited']:
+                context_parts.append(f"  • URLs visited: {len(attempt['urls_visited'])} unique pages")
+                logger.debug(f"Attempt {i} URLs: {attempt['urls_visited']}")
+            
+            # Show final result if available
+            if attempt['final_result']:
+                context_parts.append(f"  • Final result: {attempt['final_result'][:100]}...")
+                logger.info(f"Attempt {i} final result: {attempt['final_result'][:200]}...")
+        
+        # Add pattern analysis and specific guidance
+        context_parts.extend([
+            "",
+            "🔍 PATTERN ANALYSIS:"
+        ])
+        
+        if stuck_patterns:
+            unique_patterns = list(set(stuck_patterns))
+            context_parts.append(f"  • Detected stuck patterns: {', '.join(unique_patterns)}")
+            logger.info(f"Detected stuck patterns: {unique_patterns}")
+            
+            # Provide specific guidance based on patterns
+            if 'customer_listing' in unique_patterns:
+                context_parts.extend([
+                    "  • Customer listing pattern detected: Previous attempts got stuck in customer management sections",
+                    "    → Try exploring other sections first (Sales, Reports, Catalog, etc.)",
+                    "    → Look for review/feedback sections outside of customer management",
+                    "    → Consider searching for the product directly in different contexts"
+                ])
+            
+            if 'search_loops' in unique_patterns:
+                context_parts.extend([
+                    "  • Search loop pattern detected: Previous attempts got stuck in search operations",
+                    "    → Try direct navigation to specific sections instead of searching",
+                    "    → Look for menu items or navigation that might lead to the target information",
+                    "    → Consider browsing through different admin sections systematically"
+                ])
+            
+            if 'repetitive_clicking' in unique_patterns:
+                context_parts.extend([
+                    "  • Repetitive clicking pattern detected: Previous attempts kept clicking the same elements",
+                    "    → The current approach is not working, try a completely different navigation path",
+                    "    → Look for alternative ways to access the same information",
+                    "    → Consider if the information might be in a different section entirely"
+                ])
+        
+        # Analyze memory and thinking patterns
+        if memory_patterns:
+            unique_memory_patterns = list(set(memory_patterns))
+            context_parts.append(f"  • Memory patterns: {', '.join(unique_memory_patterns)}")
+            logger.info(f"Detected memory patterns: {unique_memory_patterns}")
+            
+            if 'stuck_in_search' in unique_memory_patterns:
+                context_parts.append("    → Previous attempts recognized being stuck in search - try different approaches")
+            
+            if 'customer_focus' in unique_memory_patterns:
+                context_parts.append("    → Previous attempts focused heavily on customer sections - explore other areas")
+        
+        if thinking_patterns:
+            unique_thinking_patterns = list(set(thinking_patterns))
+            context_parts.append(f"  • Thinking patterns: {', '.join(unique_thinking_patterns)}")
+            logger.info(f"Detected thinking patterns: {unique_thinking_patterns}")
+            
+            if 'seeking_alternatives' in unique_thinking_patterns:
+                context_parts.append("    → Previous attempts were seeking alternatives - this confirms the need for different approach")
+            
+            if 'recognizing_failure' in unique_thinking_patterns:
+                context_parts.append("    → Previous attempts recognized their approach wasn't working - avoid similar strategies")
+        
+        if evaluation_patterns:
+            unique_eval_patterns = list(set(evaluation_patterns))
+            context_parts.append(f"  • Evaluation patterns: {', '.join(unique_eval_patterns)}")
+            logger.info(f"Detected evaluation patterns: {unique_eval_patterns}")
+            
+            if 'partial_success' in unique_eval_patterns:
+                context_parts.append("    → Previous attempts had partial success - build on what worked")
+            
+            if 'recognized_failure' in unique_eval_patterns:
+                context_parts.append("    → Previous attempts recognized complete failure - need completely different approach")
+        
+        # Analyze evaluator feedback patterns
+        if evaluator_feedback_patterns:
+            unique_feedback_patterns = list(set(evaluator_feedback_patterns))
+            context_parts.append(f"  • Evaluator feedback patterns: {', '.join(unique_feedback_patterns)}")
+            logger.info(f"Detected evaluator feedback patterns: {unique_feedback_patterns}")
+            
+            if 'wrong_page' in unique_feedback_patterns:
+                context_parts.extend([
+                    "    → Evaluator indicated previous attempts ended up on wrong pages",
+                    "    → Focus on navigation to the correct sections and pages",
+                    "    → Double-check URLs and page content to ensure you're in the right place"
+                ])
+            
+            if 'information_not_found' in unique_feedback_patterns:
+                context_parts.extend([
+                    "    → Evaluator indicated the required information was not found",
+                    "    → Try different search terms or explore different sections",
+                    "    → Look for alternative ways the information might be presented"
+                ])
+            
+            if 'incomplete_task' in unique_feedback_patterns:
+                context_parts.extend([
+                    "    → Evaluator indicated previous attempts were incomplete",
+                    "    → Ensure you complete all required steps of the task",
+                    "    → Double-check that you've found everything requested"
+                ])
+            
+            if 'navigation_failure' in unique_feedback_patterns:
+                context_parts.extend([
+                    "    → Evaluator indicated navigation problems in previous attempts",
+                    "    → Focus on proper navigation techniques and page loading",
+                    "    → Ensure you're clicking the right elements"
+                ])
+        
+        # Check if all attempts ended at similar URLs
+        if len(set(final_urls)) <= 2 and len(final_urls) > 1:
+            context_parts.extend([
+                f"  • All attempts ended at similar locations: {', '.join(set(final_urls))}",
+                "    → This suggests the information is not in this section",
+                "    → Try exploring completely different sections of the admin panel"
+            ])
+            logger.info(f"All attempts ended at similar URLs: {set(final_urls)}")
+        
+        # Check if attempts ran out of steps
+        max_steps_used = max(attempt['steps'] for attempt in previous_attempts)
+        if max_steps_used >= 15:  # Assuming max_steps is around 15-20
+            context_parts.extend([
+                f"  • Previous attempts used {max_steps_used} steps (near limit)",
+                "    → Be more efficient and direct in your approach",
+                "    → Prioritize actions that are most likely to lead to the target information",
+                "    → Avoid exploratory actions that don't directly contribute to the goal"
+            ])
+            logger.info(f"Previous attempts used {max_steps_used} steps (near limit)")
+        
+        # Add insights from memory and thinking
+        if memory_patterns or thinking_patterns:
+            context_parts.extend([
+                "",
+                "🧠 COGNITIVE INSIGHTS:"
+            ])
+            
+            if 'stuck_in_search' in memory_patterns:
+                context_parts.append("  • Previous attempts recognized being stuck in search operations")
+                context_parts.append("  • This confirms the need to try different navigation strategies")
+            
+            if 'seeking_alternatives' in thinking_patterns:
+                context_parts.append("  • Previous attempts were actively seeking alternative approaches")
+                context_parts.append("  • This validates the need for a completely different strategy")
+            
+            if 'recognizing_failure' in thinking_patterns:
+                context_parts.append("  • Previous attempts recognized their approach wasn't working")
+                context_parts.append("  • Avoid similar strategies and try fundamentally different approaches")
+        
+        # Add evaluator feedback insights
+        if evaluator_feedback_patterns:
+            context_parts.extend([
+                "",
+                "📊 EVALUATOR FEEDBACK INSIGHTS:"
+            ])
+            
+            # Get the most recent evaluator feedback for specific guidance
+            recent_feedback = None
+            for attempt in reversed(previous_attempts):
+                if attempt['evaluator_feedback']:
+                    recent_feedback = attempt['evaluator_feedback']
+                    break
+            
+            if recent_feedback:
+                context_parts.extend([
+                    f"  • Most recent evaluator score: {recent_feedback['score']}/1.0",
+                    f"  • Success status: {'Yes' if recent_feedback['success'] else 'No'}",
+                    f"  • Key feedback: {recent_feedback['reasoning'][:300]}...",
+                    "",
+                    "  • Based on evaluator feedback:"
+                ])
+                
+                if 'wrong_page' in evaluator_feedback_patterns:
+                    context_parts.append("    → Ensure you navigate to the correct pages and sections")
+                    context_parts.append("    → Verify you're on the right page before proceeding")
+                
+                if 'information_not_found' in evaluator_feedback_patterns:
+                    context_parts.append("    → Try different search strategies and explore more sections")
+                    context_parts.append("    → Look for information in unexpected places")
+                
+                if 'incomplete_task' in evaluator_feedback_patterns:
+                    context_parts.append("    → Make sure to complete all aspects of the task")
+                    context_parts.append("    → Double-check that you've found everything requested")
+                
+                if 'navigation_failure' in evaluator_feedback_patterns:
+                    context_parts.append("    → Focus on proper navigation and page loading")
+                    context_parts.append("    → Ensure you're clicking the right elements")
+        
+        context_parts.extend([
+            "",
+            "🎯 RETRY STRATEGY:",
+            "• Analyze the previous attempts to understand where they got stuck",
+            "• Avoid repeating the same unsuccessful approaches",
+            "• Consider alternative navigation paths or search strategies",
+            "• If previous attempts got stuck in a specific section, try different sections first",
+            "• Look for patterns in the failures to identify better approaches",
+            "• Be more systematic and efficient in your navigation",
+            "• Focus on sections that are most likely to contain the target information",
+            "• Use the cognitive insights from previous attempts to guide your strategy",
+            "• Pay attention to evaluator feedback to understand what went wrong",
+            "• Address the specific issues identified by the evaluator"
+        ])
+        
+        final_context = "\n".join(context_parts)
+        logger.info(f"Generated retry context with {len(final_context)} characters and {len(final_context.split(chr(10)))} lines")
+        logger.debug(f"Retry context preview: {final_context[:500]}...")
+        
+        return final_context
+
     async def run_task(self, task: WebArenaTask, retry_info: Optional[Dict] = None) -> Dict:
         """Run a single WebArena task"""
         logger.info(f"Starting WebArena task: {task.task_id}")
@@ -560,6 +1081,26 @@ class WebArenaTaskRunner:
         logger.info(f"Start URL: {task.start_url}")
         logger.info(f"Target sites: {task.sites}")
         logger.info(f"Requires login: {task.require_login}")
+        
+        # Load previous attempts if this is a retry
+        previous_attempts = []
+        retry_context = ""
+        if retry_info:
+            logger.info(f"Loading previous attempts for retry attempt {retry_info.get('retry_attempt', 1)}")
+            previous_attempts = await self._load_previous_attempts(task.task_id)
+            retry_context = self._build_retry_context(task, previous_attempts, retry_info)
+            logger.info(f"Loaded {len(previous_attempts)} previous attempts for task {task.task_id}")
+            logger.info(f"Generated retry context: {len(retry_context)} characters")
+            
+            if retry_context:
+                logger.info("Retry context includes:")
+                logger.info(f"  • Pattern analysis: {len([line for line in retry_context.split(chr(10)) if '🔍 PATTERN ANALYSIS:' in line])} sections")
+                logger.info(f"  • Cognitive insights: {len([line for line in retry_context.split(chr(10)) if '🧠 COGNITIVE INSIGHTS:' in line])} sections")
+                logger.info(f"  • Strategy guidance: {len([line for line in retry_context.split(chr(10)) if '🎯 RETRY STRATEGY:' in line])} sections")
+            else:
+                logger.warning("No retry context generated - this may indicate no previous attempts found or analysis failed")
+        else:
+            logger.info("No retry info provided - this is an initial attempt")
         
         # Create browser session with WebArena configuration
         browser_profile = BrowserProfile(
@@ -585,9 +1126,16 @@ class WebArenaTaskRunner:
                 else:
                     logger.warning(f"Storage state file not found: {storage_state_path}")
             
-            # Create agent with task context
+            # Create agent with task context, including retry context if available
             agent_task = f"Navigate to {task.start_url} and {task.intent}"
-            logger.info(f"Initializing agent with task: {agent_task}")
+            if retry_context:
+                agent_task = f"{retry_context}\n\n{agent_task}"
+                logger.info("Agent task includes retry context")
+                logger.debug(f"Full agent task preview: {agent_task[:1000]}...")
+            else:
+                logger.info("Agent task does not include retry context")
+            
+            logger.info(f"Initializing agent with task: {agent_task[:200]}...")
             
             # Configure memory interval to prevent information loss
             memory_config = MemoryConfig(
@@ -614,6 +1162,13 @@ class WebArenaTaskRunner:
             logger.info(f"Running agent for task {task.task_id}")
             agent_history = await agent.run(max_steps=self.max_steps)
             
+            # Log agent execution summary
+            logger.info(f"Agent execution completed for task {task.task_id}")
+            logger.info(f"  • Steps taken: {len(agent_history.history)}")
+            logger.info(f"  • Final success: {agent_history.is_successful()}")
+            final_result = agent_history.final_result()
+            logger.info(f"  • Final result: {final_result[:200] if final_result else 'None'}...")
+            
             # Evaluate the result
             logger.info(f"Evaluating task {task.task_id}")
             evaluation = await self.evaluator.evaluate_task_completion(task, agent_history)
@@ -621,6 +1176,7 @@ class WebArenaTaskRunner:
             # Add retry information to evaluation if this is a retry
             if retry_info:
                 evaluation.update(retry_info)
+                logger.info(f"Updated evaluation with retry info: attempt {retry_info.get('retry_attempt', 1)}")
             
             # Log evaluation results
             logger.info(f"Task {task.task_id} evaluation results:")
@@ -642,10 +1198,25 @@ class WebArenaTaskRunner:
             # Add retry metadata if this is a retry
             if retry_info:
                 result_data['retry_metadata'] = retry_info
+                result_data['previous_attempts_summary'] = [
+                    {
+                        'file': attempt['file'],
+                        'steps': attempt['steps'],
+                        'final_state': attempt['final_state'],
+                        'error_count': len(attempt['errors']),
+                        'memory_entries': len(attempt['memory_entries']),
+                        'thinking_entries': len(attempt['thinking_entries']),
+                        'evaluation_entries': len(attempt['evaluation_entries']),
+                        'urls_visited': len(attempt['urls_visited']),
+                        'evaluator_feedback': attempt['evaluator_feedback']
+                    }
+                    for attempt in previous_attempts
+                ]
+                logger.info(f"Added retry metadata and previous attempts summary to result data")
             
             # Save to files
             await self._save_result(task.task_id, result_data)
-            await self._save_agent_history(task.task_id, agent_history)
+            await self._save_agent_history(task.task_id, agent_history, retry_info.get('retry_attempt', 0) if retry_info else 0)
             logger.info(f"Saved task results to saved_trajectories/webarena/{task.task_id}.json")
             
             return evaluation
@@ -682,12 +1253,16 @@ class WebArenaTaskRunner:
         async with await anyio.open_file(result_file, 'w') as f:
             await f.write(json.dumps(result_data, indent=2, default=str))
 
-    async def _save_agent_history(self, task_id: str, agent_history: AgentHistoryList):
+    async def _save_agent_history(self, task_id: str, agent_history: AgentHistoryList, retry_attempt: int = 0):
         """Save agent history directly to file"""
         history_dir = Path("saved_trajectories/webarena/agent_history")
         history_dir.mkdir(parents=True, exist_ok=True)
         
-        history_file = history_dir / f"{task_id}_history.json"
+        # Include retry attempt in filename to preserve all attempts
+        if retry_attempt > 0:
+            history_file = history_dir / f"{task_id}_history_retry_{retry_attempt}.json"
+        else:
+            history_file = history_dir / f"{task_id}_history.json"
         
         # Convert history to serializable format
         history_data = {
@@ -784,6 +1359,7 @@ async def run_webarena_evaluation(
             break
             
         logger.info(f"Retry attempt {retry_attempt}/{max_retries}: Retrying {len(failed_tasks)} failed task(s)")
+        logger.info(f"Failed tasks to retry: {[task.task_id for task, _ in failed_tasks]}")
         
         # Wait before retry
         if retry_delay > 0:
@@ -801,6 +1377,10 @@ async def run_webarena_evaluation(
             for _, original_result in failed_tasks
         ]
         
+        logger.info(f"Preparing retry info for {len(retry_tasks)} tasks:")
+        for i, (task, original_result) in enumerate(failed_tasks):
+            logger.info(f"  • Task {task.task_id}: retry_attempt={retry_attempt}, original_reason={original_result.get('reasoning', 'Unknown')[:100]}...")
+        
         retry_results = await asyncio.gather(*[
             run_with_semaphore_and_retry_info(task, retry_info) 
             for task, retry_info in zip(retry_tasks, retry_info_list)
@@ -810,6 +1390,8 @@ async def run_webarena_evaluation(
         new_failed_tasks = []
         for i, (original_task, original_result) in enumerate(failed_tasks):
             retry_result = retry_results[i]
+            
+            logger.info(f"Retry result for task {original_task.task_id}: success={retry_result.get('success', False)}")
             
             # Update the result in all_results if retry was successful
             if retry_result.get('success', False):
@@ -827,8 +1409,10 @@ async def run_webarena_evaluation(
                         break
                 new_failed_tasks.append((original_task, retry_result))
                 logger.info(f"Task {original_task.task_id} failed on retry attempt {retry_attempt}")
+                logger.debug(f"Retry failure reason: {retry_result.get('reasoning', 'Unknown')[:200]}...")
         
         failed_tasks = new_failed_tasks
+        logger.info(f"After retry attempt {retry_attempt}: {len(failed_tasks)} tasks still failed")
     
     # Calculate summary statistics
     total_tasks = len(all_results)
@@ -995,7 +1579,7 @@ if __name__ == '__main__':
         # Show retry statistics if any retries were performed
         if summary['total_retries'] > 0:
             print(f"\n=== Retry Statistics ===")
-            print(f"Total retries: {summary['total_retries']}")
+            # print(f"Total retries: {summary['total_retries']}")
             print(f"Total retry attempts: {summary['total_retry_attempts']}")
             print(f"Successful retries: {summary['successful_retries']}")
             print(f"Retry success rate: {summary['retry_success_rate']:.2%}")
