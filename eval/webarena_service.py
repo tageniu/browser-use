@@ -28,11 +28,10 @@
 # python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 10 --start 401 --end 411 --max-steps 15 --max-retries 1
 # Shopping
 # python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --max-parallel 10 --start 141 --end 151 --max-steps 15 --max-retries 1
-# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 10 --start 141 --end 151 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 1 --start 141 --end 151 --max-steps 15 --max-retries 1
 # Shopping admin
 # python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --max-parallel 10 --start 111 --end 121 --max-steps 15 --max-retries 1
-# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 10 --start 111 --end 121 --max-steps 15 --max-retries 1
-# python eval/webarena_service.py --model gpt-o4-mini --eval-model gpt-o4-mini --max-parallel 10 --start 111 --end 121 --max-steps 15 --max-retries 1
+# python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 1 --start 111 --end 121 --max-steps 15 --max-retries 1
 # Gitlab
 # python eval/webarena_service.py --model gpt-4o --eval-model gpt-4o --max-parallel 10 --start 303 --end 313 --max-steps 15 --max-retries 1
 # python eval/webarena_service.py --model gpt-4.1 --eval-model gpt-4.1 --max-parallel 10 --start 303 --end 313 --max-steps 15 --max-retries 1

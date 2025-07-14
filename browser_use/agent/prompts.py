@@ -152,7 +152,7 @@ Interactive elements from top layer of the current page inside the viewport{trun
 
 		_todo_contents = self.file_system.get_todo_contents() if self.file_system else ''
 		if not len(_todo_contents):
-			_todo_contents = '[Current todo.md is empty, fill it with your plan when applicable]'
+			_todo_contents = '[Current todo.md is empty, fill it with your plan when applicable. For complex tasks, prioritize approaches by SUCCESS PROBABILITY and CONTEXT, not just step count. Consider what UI elements are visible/available and use task-specific intelligence (customer tasks → customer search, product tasks → product search).]'
 
 		agent_state = f"""
 <user_request>
@@ -231,6 +231,7 @@ Your role is to:
 2. Evaluate progress towards the ultimate goal
 3. Identify potential challenges or roadblocks
 4. Suggest the next high-level steps to take
+5. **STRATEGIC ANALYSIS**: For complex tasks, identify multiple possible solution paths and estimate their efficiency
 
 Inside your messages, there will be AI messages from different agents with different formats.
 
@@ -239,9 +240,27 @@ Your output format should be always a JSON object with the following fields:
     "state_analysis": "Brief analysis of the current state and what has been done so far",
     "progress_evaluation": "Evaluation of progress towards the ultimate goal (as percentage and description)",
     "challenges": "List any potential challenges or roadblocks",
-    "next_steps": "List 2-3 concrete next steps to take",
-    "reasoning": "Explain your reasoning for the suggested next steps"
+    "solution_paths": "If multiple approaches exist, list them with estimated efficiency (steps/complexity). Format: ['Approach 1 (3-4 steps): description', 'Approach 2 (6-8 steps): description']",
+    "next_steps": "List 2-3 concrete next steps to take, prioritizing the most efficient approach",
+    "reasoning": "Explain your reasoning for the suggested next steps and path prioritization"
 }}
+
+**STRATEGIC GUIDANCE**:
+- When analyzing tasks, consider if there are direct vs. indirect approaches
+- Estimate step complexity: simple navigation (1-2 steps), search operations (2-4 steps), complex workflows (5+ steps)
+- Prioritize approaches that minimize navigation depth and utilize available UI features effectively
+- Include fallback strategies in case the primary approach encounters obstacles
+- **SPECIFIC NAVIGATION**: Every approach must include exact navigation instructions with page names, button labels, and UI element descriptions
+- **COMPREHENSIVE ANALYSIS**: Identify 5-8 different approaches when possible, considering all available UI features and navigation options
+- **INTELLIGENT PRIORITIZATION**: Don't just count steps - prioritize by success probability and context:
+  * HIGHEST PRIORITY (90% success): Direct search functions, visible filters, obvious UI shortcuts for the task type
+  * MEDIUM PRIORITY (70% success): Category navigation with search/filter options, indirect but logical paths
+  * LOW PRIORITY (50% success): Manual browsing, multi-step workflows, complex navigation chains
+- **CONTEXT AWARENESS**: Analyze what's currently visible/available on the page. If you see a customer search box, prioritize customer-focused approaches. If you see product categories, evaluate if browsing makes sense for the specific task.
+- **TASK-SPECIFIC INTELLIGENCE**: 
+  * For customer feedback tasks: Customer search > Reviews search > Product pages > Manual browsing
+  * For product information: Direct product search > Category browsing > Search results > Individual listings
+  * For order/transaction data: Orders search > Customer profiles > Reports > Manual lookup
 
 Ignore the other AI messages output structures.
 
