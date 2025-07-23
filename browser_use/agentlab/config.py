@@ -43,6 +43,21 @@ MINIWOB_CONFIG = BrowserUseAgentArgs(
 	headless=True,
 )
 
+# GAIA benchmark configuration
+GAIA_CONFIG = BrowserUseAgentArgs(
+	model_name="gpt-4o",
+	temperature=0.3,  # Lower temperature for accuracy
+	use_vision=True,
+	use_thinking=True,
+	use_accessibility_tree=True,
+	enable_memory=True,  # Important for multi-step GAIA tasks
+	max_actions_per_step=3,  # GAIA tasks may require multiple actions
+	planner_interval=2,  # More frequent planning
+	viewport_width=1280,
+	viewport_height=960,
+	headless=True,
+)
+
 # Reproducibility configuration
 REPRODUCIBLE_CONFIG = BrowserUseAgentArgs(
 	model_name="gpt-4o",
@@ -59,6 +74,7 @@ def get_config_for_benchmark(benchmark: str) -> BrowserUseAgentArgs:
 		"webarena": WEBARENA_CONFIG,
 		"workarena": WORKARENA_CONFIG,
 		"miniwob": MINIWOB_CONFIG,
+		"gaia": GAIA_CONFIG,
 		"default": DEFAULT_BROWSER_USE_AGENT,
 	}
 	

@@ -33,14 +33,31 @@ TargetClosedError = PatchrightTargetClosedError | PlaywrightTargetClosedError
 async_patchright = _async_patchright
 async_playwright = _async_playwright
 
+# Import common structures from playwright
 from playwright._impl._api_structures import (
-	ClientCertificate,
 	Geolocation,
 	HttpCredentials,
 	ProxySettings,
 	StorageState,
 	ViewportSize,
 )
+
+# Try to import ClientCertificate from available source
+try:
+	from patchright._impl._api_structures import ClientCertificate
+except ImportError:
+	try:
+		from playwright._impl._api_structures import ClientCertificate
+	except ImportError:
+		# Define a placeholder if not available
+		from typing import TypedDict
+		
+		class ClientCertificate(TypedDict, total=False):
+			origin: str
+			certPath: str
+			keyPath: str
+			pfxPath: str
+			passphrase: str
 
 # fix pydantic error on python 3.11
 # PydanticUserError: Please use `typing_extensions.TypedDict` instead of `typing.TypedDict` on Python < 3.12.

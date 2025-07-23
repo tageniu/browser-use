@@ -323,7 +323,7 @@ class BrowserContextArgs(BaseModel):
 		# notifications are to avoid browser fingerprinting
 	)
 	bypass_csp: bool = False
-	client_certificates: list[ClientCertificate] = Field(default_factory=list)
+	# client_certificates: list[ClientCertificate] = Field(default_factory=list)  # Commented out for compatibility
 	extra_http_headers: dict[str, str] = Field(default_factory=dict)
 	http_credentials: HttpCredentials | None = None
 	ignore_https_errors: bool = False
@@ -343,9 +343,9 @@ class BrowserContextArgs(BaseModel):
 	geolocation: Geolocation | None = None
 	timezone_id: str | None = None
 	color_scheme: ColorScheme = ColorScheme.LIGHT
-	contrast: Contrast = Contrast.NO_PREFERENCE
-	reduced_motion: ReducedMotion = ReducedMotion.NO_PREFERENCE
-	forced_colors: ForcedColors = ForcedColors.NONE
+	# contrast: Contrast = Contrast.NO_PREFERENCE  # Commented for Playwright 1.44 compatibility
+	# reduced_motion: ReducedMotion = ReducedMotion.NO_PREFERENCE  # Commented for compatibility
+	# forced_colors: ForcedColors = ForcedColors.NONE  # Commented for compatibility
 
 	# Recording Options
 	record_har_content: RecordHarContent = RecordHarContent.EMBED

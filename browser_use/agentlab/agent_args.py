@@ -67,3 +67,8 @@ class BrowserUseAgentArgs(AgentArgs):
 		elif benchmark == "webarena":
 			self.use_vision = True
 			self.max_actions_per_step = 1
+			
+	def make_agent(self):
+		"""Create a Browser-Use agent instance."""
+		from browser_use.agentlab.agent import BrowserUseAgent
+		return BrowserUseAgent(self)
