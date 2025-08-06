@@ -1,4 +1,13 @@
-"""GAIA 2023 dataset with Browser-Use integration."""
+"""GAIA 2023 dataset with Browser-Use integration.
+
+Setup Instructions:
+1. Create a Google Drive folder for all GAIA attachments
+2. Upload all GAIA attachment files to this folder
+3. Right-click the folder and select "Get link"
+4. Set sharing to "Anyone with the link can view"
+5. Copy the folder URL and set it in GAIA_ATTACHMENTS_FOLDER_URL below
+6. The agent will navigate to this folder and click on specific files as needed
+"""
 
 import asyncio
 import json
@@ -7,7 +16,12 @@ import os
 from datetime import datetime
 from typing import Dict, Any
 import re
-
+import random
+from collections import Counter
+import speech_recognition as sr
+from pathlib import Path
+from pydub import AudioSegment
+import tempfile
 import datasets
 from dotenv import load_dotenv
 
@@ -40,6 +54,12 @@ _NAMES = [
 YEAR_TO_LEVELS = {"2023": [1, 2, 3]}
 
 separator = "_"
+
+# Google Drive folder containing all GAIA attachments
+# Replace with your actual Google Drive folder URL
+# Make sure the folder is shared with "Anyone with the link can view"
+GAIA_ATTACHMENTS_FOLDER_URL = "https://drive.google.com/drive/folders/1vnbNe_bs88VCHMG3ZrzW72WzXQ0__BK4?usp=sharing"
+# Example: "https://drive.google.com/drive/folders/1vnbNe_bs88VCHMG3ZrzW72WzXQ0__BK4?usp=sharing"
 
 
 class GAIA_dataset(datasets.GeneratorBasedBuilder):
@@ -109,8 +129,94 @@ class GAIA_dataset(datasets.GeneratorBasedBuilder):
                     yield key, cur_line
 
 
-async def run_gaia_task_with_agent(task_data: Dict[str, Any], task_index: int) -> Dict[str, Any]:
-    """Run a single GAIA task using Browser-Use agent."""
+def convert_audio_to_text(audio_file_path: str) -> str:
+    """Convert audio file to text using speech recognition."""
+    recognizer = sr.Recognizer()
+    
+    try:
+        # Check if file exists
+        if not os.path.exists(audio_file_path):
+            return f"[Audio transcription failed: File not found at {audio_file_path}]"
+        
+        file_size = os.path.getsize(audio_file_path)
+        logger.info(f"Processing audio file: {audio_file_path} (size: {file_size} bytes)")
+        
+        # Check file extension
+        file_ext = Path(audio_file_path).suffix.lower()
+        
+        # If not WAV, convert to WAV first using pydub
+        if file_ext != '.wav':
+            logger.info(f"Converting {file_ext} to WAV format...")
+            
+            try:
+                # Load audio file with pydub
+                audio = AudioSegment.from_file(audio_file_path)
+                
+                # Convert to mono and standard sample rate for speech recognition
+                audio = audio.set_channels(1)
+                audio = audio.set_frame_rate(16000)
+                
+                # Add a small silence at the beginning to prevent cutting off start
+                silence = AudioSegment.silent(duration=200)  # 200ms silence
+                audio = silence + audio
+                
+                # Create temporary WAV file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
+                    tmp_wav_path = tmp_wav.name
+                    # Export as WAV
+                    audio.export(tmp_wav_path, format='wav')
+                
+                # Use the temporary WAV file
+                audio_file_path = tmp_wav_path
+                cleanup_temp = True
+            except Exception as e:
+                logger.error(f"Failed to convert audio: {e}")
+                return f"[Audio transcription failed: Could not convert audio - {e}. Make sure ffmpeg is installed]"
+        else:
+            cleanup_temp = False
+        
+        # Now process the WAV file
+        try:
+            with sr.AudioFile(audio_file_path) as source:
+                # Don't adjust for ambient noise - it can cut off the beginning
+                # Record the entire audio
+                audio_data = recognizer.record(source)
+        finally:
+            # Clean up temporary file if created
+            if cleanup_temp and os.path.exists(audio_file_path):
+                os.unlink(audio_file_path)
+            
+        # Try Google Speech Recognition first (free, no API key needed)
+        try:
+            # Get the transcription
+            result = recognizer.recognize_google(audio_data, show_all=True)
+            
+            if isinstance(result, dict) and 'alternative' in result:
+                # Get the best transcription
+                text = result['alternative'][0]['transcript']
+            elif isinstance(result, str):
+                text = result
+            else:
+                text = str(result)
+                
+            logger.info(f"Successfully transcribed audio: {text[:100]}...")
+            return text
+        except sr.UnknownValueError:
+            logger.warning("Google Speech Recognition could not understand the audio")
+            return "[Audio transcription failed: Could not understand the audio]"
+        except sr.RequestError as e:
+            logger.error(f"Google Speech Recognition error: {e}")
+            return f"[Audio transcription failed: {e}]"
+            
+    except Exception as e:
+        logger.error(f"Failed to process audio file: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"[Audio transcription failed: {e}]"
+
+
+async def run_gaia_task_with_agent(task_data: Dict[str, Any], task_index: int, attempt_number: int = 1) -> Dict[str, Any]:
+    """Run a single GAIA task attempt using Browser-Use agent."""
     
     # Initialize LLM
     llm = ChatOpenAI(
@@ -124,6 +230,10 @@ async def run_gaia_task_with_agent(task_data: Dict[str, Any], task_index: int) -
     task_level = task_data.get("Level", "")
     task_id = task_data.get("task_id", f"task_{task_index}")
     
+    # Check for attachments
+    file_name = task_data.get("file_name", "")
+    file_path = task_data.get("file_path", "")
+    
     # GAIA system prompt for answer format
     system_prompt = """You are a general AI assistant. I will ask you a question. Report your thoughts, and finish your answer with the following template: FINAL ANSWER: [YOUR FINAL ANSWER]. 
 YOUR FINAL ANSWER should be a number OR as few words as possible OR a comma separated list of numbers and/or strings. 
@@ -131,18 +241,59 @@ If you are asked for a number, don't use comma to write your number neither use 
 If you are asked for a string, don't use articles, neither abbreviations (e.g. for cities), and write the digits in plain text unless specified otherwise. 
 If you are asked for a comma separated list, apply the above rules depending of whether the element to be put in the list is a number or a string."""
     
+    # Handle attachments if present
+    attachment_info = ""
+    if file_name:
+        # Check if it's an audio file
+        audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma', '.aac', '.opus'}
+        file_ext = Path(file_name).suffix.lower()
+        
+        if file_ext in audio_extensions:
+            logger.info(f"Detected audio file: {file_name}")
+            
+            # If we have the local file path, convert it
+            if file_path and os.path.exists(file_path):
+                logger.info(f"Converting audio file to text: {file_path}")
+                audio_text = convert_audio_to_text(file_path)
+                attachment_info = f"\n\nATTACHMENT: {file_name} (Audio file)\n\nTranscribed content:\n{audio_text}"
+            else:
+                # Fallback to Google Drive approach but with a note about audio
+                attachment_info = f"\n\nATTACHMENT: {file_name} (Audio file)\n\nNote: This is an audio file. The content needs to be transcribed to answer the question."
+        else:
+            attachment_info = f"""\n\nATTACHMENT: {file_name}
+
+To analyze this attachment:
+1. Navigate to the Google Drive folder: {GAIA_ATTACHMENTS_FOLDER_URL}
+2. Wait for the folder to load completely
+3. Look for '{file_name}' in the file list (you may need to scroll)
+4. Click on '{file_name}' to open it
+5. The file will open in Google's appropriate viewer:
+   - Excel files (.xlsx) → Google Sheets
+   - PowerPoint files (.pptx) → Google Slides
+   - PDFs → Google's PDF viewer
+   - Images → Direct image view
+6. IMPORTANT: For multi-page documents (PDFs, presentations, etc.):
+   - Use SCROLL DOWN to view subsequent pages within the same document
+   - DO NOT click the "Next" button - it navigates to a different file
+   - Keep scrolling until you've reviewed all pages of the current document
+7. Analyze the content to answer the question
+8. Use the browser's vision capabilities for images and visual content"""
+            logger.info(f"Task has attachment: {file_name} in Google Drive folder")
+    
     # Create the task prompt with GAIA formatting requirements
     task_prompt = f"""{system_prompt}
 
-Question: {task_question}
+Question: {task_question}{attachment_info}
 
 IMPORTANT: Remember to conclude your response with "FINAL ANSWER: [YOUR FINAL ANSWER]" following the format rules above.
     """
     
-    logger.info(f"Running GAIA Task {task_index + 1}")
+    logger.info(f"Running GAIA Task {task_index + 1} - Attempt {attempt_number}")
     logger.info(f"Task ID: {task_id}")
     logger.info(f"Level: {task_level}")
     logger.info(f"Question: {task_question}")
+    if file_name:
+        logger.info(f"Attachment: {file_name}")
     
     # Log the expected/true answer
     expected_answer = task_data.get("Final answer", "")
@@ -154,7 +305,7 @@ IMPORTANT: Remember to conclude your response with "FINAL ANSWER: [YOUR FINAL AN
     # Create agent
     browser_config = BrowserConfig(
 		headless=False,
-		window_size={'width': 1820, 'height': 1080},
+		window_size={'width': 1720, 'height': 1080},
 	)
     browser = Browser(browser_profile=browser_config)
     agent = Agent(
@@ -173,7 +324,7 @@ IMPORTANT: Remember to conclude your response with "FINAL ANSWER: [YOUR FINAL AN
         end_time = datetime.now()
         execution_time = (end_time - start_time).total_seconds()
         
-        logger.info(f"✓ Task {task_index + 1} completed in {execution_time:.2f} seconds")
+        logger.info(f"✓ Task {task_index + 1} Attempt {attempt_number} completed in {execution_time:.2f} seconds")
         
         # Extract the FINAL ANSWER from the agent's response
         final_result = "No answer extracted"
@@ -234,7 +385,7 @@ IMPORTANT: Remember to conclude your response with "FINAL ANSWER: [YOUR FINAL AN
         return result
         
     except Exception as e:
-        logger.error(f"✗ Task {task_index + 1} failed: {e}")
+        logger.error(f"✗ Task {task_index + 1} Attempt {attempt_number} failed: {e}")
         return {
             "task_index": task_index,
             "task_id": task_id,
@@ -246,6 +397,83 @@ IMPORTANT: Remember to conclude your response with "FINAL ANSWER: [YOUR FINAL AN
             "complete": False,
             "timestamp": datetime.now().isoformat(),
         }
+
+
+async def run_task_with_multiple_attempts(task_data: Dict[str, Any], task_index: int, num_attempts: int = 3) -> Dict[str, Any]:
+    """Run a GAIA task multiple times and use majority voting for the final answer."""
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Running task {task_index + 1} with {num_attempts} attempts")
+    logger.info(f"{'='*60}")
+    
+    # Run the task multiple times
+    all_attempts = []
+    for attempt_num in range(1, num_attempts + 1):
+        logger.info(f"\n--- Attempt {attempt_num}/{num_attempts} ---")
+        attempt_result = await run_gaia_task_with_agent(task_data, task_index, attempt_num)
+        all_attempts.append(attempt_result)
+        
+        # Small delay between attempts
+        if attempt_num < num_attempts:
+            await asyncio.sleep(2)
+    
+    # Extract answers from all attempts
+    answers = []
+    for i, attempt in enumerate(all_attempts):
+        answer = attempt.get("agent_answer", "No answer extracted")
+        answers.append(answer)
+        logger.info(f"Attempt {i+1} answer: {answer}")
+    
+    # Perform majority voting
+    answer_counts = Counter(answers)
+    
+    # Get the most common answer(s)
+    if answer_counts:
+        max_count = max(answer_counts.values())
+        most_common_answers = [ans for ans, count in answer_counts.items() if count == max_count]
+        
+        if len(most_common_answers) == 1:
+            # Clear majority
+            final_answer = most_common_answers[0]
+            logger.info(f"\nMajority vote result: {final_answer} (appeared {max_count} times)")
+        else:
+            # Tie - randomly pick one
+            final_answer = random.choice(most_common_answers)
+            logger.info(f"\nTie detected among {len(most_common_answers)} answers: {most_common_answers}")
+            logger.info(f"Randomly selected: {final_answer}")
+    else:
+        # No valid answers
+        final_answer = "No answer extracted"
+        logger.info("\nNo valid answers from any attempt")
+    
+    # Build the final result
+    result = {
+        "task_index": task_index,
+        "task_id": task_data.get("task_id", f"task_{task_index}"),
+        "question": task_data.get("Question", ""),
+        "level": task_data.get("Level", ""),
+        "expected_answer": task_data.get("Final answer", ""),
+        "final_answer": final_answer,
+        "all_attempts": all_attempts,
+        "attempt_answers": answers,
+        "answer_distribution": dict(answer_counts),
+        "num_attempts": num_attempts,
+        "complete": any(attempt.get("complete", False) for attempt in all_attempts),
+        "timestamp": datetime.now().isoformat(),
+    }
+    
+    # Score the final answer if expected answer is available
+    expected_answer = task_data.get("Final answer", "")
+    if expected_answer and expected_answer != "?":
+        try:
+            logger.info(f"Expected Answer: {expected_answer}")
+            is_correct = question_scorer(final_answer, expected_answer)
+            logger.info(f"Final Answer Correct: {is_correct}")
+            result["success"] = is_correct
+        except Exception as e:
+            logger.warning(f"Could not score answer: {e}")
+    
+    return result
 
 
 async def load_and_run_gaia_tasks(num_tasks: int = 10):
@@ -280,9 +508,15 @@ async def load_and_run_gaia_tasks(num_tasks: int = 10):
     
     all_results = []
     
+    # Initialize file names
+    results_file = "gaia_browser_use_results.json"
+    answers_file = "gaia_answers.json"
+    
     # Run tasks sequentially to avoid resource conflicts
     for i, task_data in enumerate(tasks_to_run):
-        if i == 4 or i == 26 or i == 33: # For youtube tasks
+        # if i == 4 or i == 26 or i == 33: # For youtube tasks
+        if i == 6: # For PDF task
+        # if i == 7: # For attachment task in [7, 9, 27, 30, 34, 44, 51]
             logger.info("\n")
             logger.info(f"{'-'*60}")
             logger.info(f"TASK {i + 1}/{len(tasks_to_run)}")
@@ -292,19 +526,18 @@ async def load_and_run_gaia_tasks(num_tasks: int = 10):
             if not isinstance(task_data, dict):
                 task_data = dict(task_data)
             
-            result = await run_gaia_task_with_agent(task_data, i)
+            # Run task with multiple attempts and majority voting
+            result = await run_task_with_multiple_attempts(task_data, i, num_attempts=3)
             all_results.append(result)
             
             # Save individual result to files after each task
-            results_file = "gaia_browser_use_results.json"
             with open(results_file, "w") as f:
                 json.dump(all_results, f, indent=2)
             
             # Save answer in JSONL format after each task
-            answers_file = "gaia_answers.json"
             answer_obj = {
                 "task_id": result.get("task_id", f"task_{i}"),
-                "model_answer": result.get("agent_answer", "No answer extracted")
+                "model_answer": result.get("final_answer", "No answer extracted")
             }
             
             # Append to answers file (or create if first task)
@@ -326,18 +559,50 @@ async def load_and_run_gaia_tasks(num_tasks: int = 10):
     
     successful_tasks = [r for r in all_results if r.get("complete", False)]
     correct_tasks = [r for r in all_results if r.get("success", False)]
-    success_rate = len(successful_tasks) / len(all_results) * 100 if all_results else 0
     accuracy_rate = len(correct_tasks) / len(all_results) * 100 if all_results else 0
     
     logger.info(f"Tasks completed: {len(all_results)}")
-    logger.info(f"Tasks ran successfully: {len(successful_tasks)}")
-    logger.info(f"Tasks answered correctly: {len(correct_tasks)}")
+    logger.info(f"Tasks with at least one successful attempt: {len(successful_tasks)}")
+    logger.info(f"Tasks answered correctly (based on majority vote): {len(correct_tasks)}")
     logger.info(f"Score: {accuracy_rate:.1f}%")
     
-    total_time = sum(r.get("execution_time_seconds", 0) for r in all_results)
-    avg_time = total_time / len(all_results) if all_results else 0
-    logger.info(f"Total execution time: {total_time:.1f} seconds")
-    logger.info(f"Average time per task: {avg_time:.1f} seconds")
+    # Calculate total execution time from all attempts
+    total_time = 0
+    total_attempts = 0
+    for result in all_results:
+        if "all_attempts" in result:
+            for attempt in result["all_attempts"]:
+                total_time += attempt.get("execution_time_seconds", 0)
+                total_attempts += 1
+    
+    avg_time_per_attempt = total_time / total_attempts if total_attempts else 0
+    avg_time_per_task = total_time / len(all_results) if all_results else 0
+    
+    logger.info(f"\nTotal execution time: {total_time:.1f} seconds")
+    logger.info(f"Average time per task (3 attempts): {avg_time_per_task:.1f} seconds") 
+    logger.info(f"Average time per attempt: {avg_time_per_attempt:.1f} seconds")
+    
+    # Print voting statistics
+    logger.info("\nVoting Statistics:")
+    unanimous_tasks = 0
+    majority_tasks = 0
+    tie_tasks = 0
+    
+    for result in all_results:
+        if "answer_distribution" in result:
+            distribution = result["answer_distribution"]
+            if distribution:
+                max_count = max(distribution.values())
+                if max_count == 3:
+                    unanimous_tasks += 1
+                elif max_count == 2:
+                    majority_tasks += 1
+                else:
+                    tie_tasks += 1
+    
+    logger.info(f"  Unanimous agreement (3/3): {unanimous_tasks} tasks")
+    logger.info(f"  Majority agreement (2/3): {majority_tasks} tasks")
+    logger.info(f"  No majority (tie): {tie_tasks} tasks")
     
     logger.info(f"\nDetailed results saved to: {results_file}")
     logger.info(f"Answers saved to: {answers_file}")

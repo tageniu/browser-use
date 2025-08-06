@@ -13,10 +13,13 @@ from browser_use.browser import BrowserSession
 from browser_use.browser.types import ElementHandle, Page
 from browser_use.controller.registry.service import Registry
 from browser_use.controller.views import (
+	AnalyzeVideoAction,
 	ClickElementAction,
 	CloseTabAction,
 	DoneAction,
 	DragDropAction,
+	ExtractPDFContentAction,
+	ExtractVideoTranscriptAction,
 	GoToUrlAction,
 	InputTextAction,
 	NoParamsAction,
@@ -27,6 +30,7 @@ from browser_use.controller.views import (
 	SearchWithinWebsiteAction,
 	SendKeysAction,
 	SwitchTabAction,
+	TakeVideoSnapshotAction,
 )
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.llm.base import BaseChatModel
@@ -567,6 +571,54 @@ Only use this for extracting info from a single product/article page, not for en
 
 			import markdownify
 
+			# Check if the page is a PDF viewer or PDF URL
+			is_pdf_viewer = await page.evaluate("!!document?.body?.querySelector('body > embed[type=\"application/pdf\"][width=\"100%\"]')")
+			is_pdf_url = page.url.lower().endswith('.pdf')
+			
+			if is_pdf_viewer or is_pdf_url:
+				# Use PDF processor to extract content
+				try:
+					from browser_use.pdf import PDFProcessor
+					pdf_processor = PDFProcessor()
+					pdf_content = await pdf_processor.extract_text_from_url(page.url, query)
+					
+					extracted_content = f'Page Link: {page.url}\nQuery: {query}\nExtracted PDF Content:\n{pdf_content}'
+					
+					# Handle memory storage similar to regular content extraction
+					MAX_MEMORY_SIZE = 600
+					if len(extracted_content) < MAX_MEMORY_SIZE:
+						memory = extracted_content
+						include_extracted_content_only_once = False
+					else:
+						# Save large content to file and create summary for memory
+						lines = extracted_content.splitlines()
+						display = ''
+						display_lines_count = 0
+						for line in lines:
+							if len(display) + len(line) < MAX_MEMORY_SIZE:
+								display += line + '\n'
+								display_lines_count += 1
+							else:
+								break
+						save_result = await file_system.save_extracted_content(extracted_content)
+						memory = f'Extracted PDF content from {page.url}\n<query>{query}\n</query>\n<extracted_content>\n{display}{len(lines) - display_lines_count} more lines...\n</extracted_content>\n<file_system>{save_result}</file_system>'
+						include_extracted_content_only_once = True
+					
+					logger.info(f'📄 {memory}')
+					return ActionResult(
+						extracted_content=extracted_content,
+						include_extracted_content_only_once=include_extracted_content_only_once,
+						long_term_memory=memory,
+					)
+				except Exception as e:
+					logger.warning(f"PDF processing failed: {e}")
+					# Fallback to the original message if PDF processing fails
+					return ActionResult(
+						extracted_content=f"Page Link: {page.url}\nQuery: {query}\nNote: This is a PDF document, but content extraction failed: {str(e)}. You may need to install PDF processing dependencies with 'pip install browser-use[pdf]'.",
+						include_extracted_content_only_once=False,
+						long_term_memory=f"Attempted to extract from PDF at {page.url} - PDF extraction failed: {str(e)}"
+					)
+
 			strip = []
 			include_links = False
 			lower_query = query.lower()
@@ -662,6 +714,59 @@ Explain the content of the page and that the requested information is not availa
 				return ActionResult(error=str(e))
 
 		@self.registry.action(
+			'Extract text content from a PDF document by URL - useful when you encounter PDF links or need to process PDF documents directly',
+			param_model=ExtractPDFContentAction,
+		)
+		async def extract_pdf_content(
+			params: ExtractPDFContentAction,
+			file_system: FileSystem,
+		):
+			"""Extract content from a PDF document."""
+			try:
+				from browser_use.pdf import PDFProcessor
+				pdf_processor = PDFProcessor()
+				pdf_content = await pdf_processor.extract_text_from_url(params.url, params.query)
+				
+				extracted_content = f'PDF URL: {params.url}\nQuery: {params.query or "Full content extraction"}\nExtracted PDF Content:\n{pdf_content}'
+				
+				# Handle memory storage for large PDF content
+				MAX_MEMORY_SIZE = 600
+				if len(extracted_content) < MAX_MEMORY_SIZE:
+					memory = extracted_content
+					include_extracted_content_only_once = False
+				else:
+					# Save large content to file and create summary for memory
+					lines = extracted_content.splitlines()
+					display = ''
+					display_lines_count = 0
+					for line in lines:
+						if len(display) + len(line) < MAX_MEMORY_SIZE:
+							display += line + '\n'
+							display_lines_count += 1
+						else:
+							break
+					save_result = await file_system.save_extracted_content(extracted_content)
+					query_info = f"Query: {params.query}" if params.query else "Full content extraction"
+					memory = f'Extracted PDF content from {params.url}\n<{query_info}>\n<extracted_content>\n{display}{len(lines) - display_lines_count} more lines...\n</extracted_content>\n<file_system>{save_result}</file_system>'
+					include_extracted_content_only_once = True
+				
+				logger.info(f'📄 PDF extracted: {len(pdf_content)} characters from {params.url}')
+				return ActionResult(
+					extracted_content=extracted_content,
+					include_extracted_content_only_once=include_extracted_content_only_once,
+					long_term_memory=memory,
+				)
+			except Exception as e:
+				error_msg = f"Failed to extract PDF content from {params.url}: {str(e)}"
+				logger.error(error_msg)
+				fallback_msg = f"PDF extraction failed. You may need to install PDF processing dependencies with 'pip install browser-use[pdf]'. Error: {str(e)}"
+				return ActionResult(
+					error=fallback_msg,
+					include_in_memory=True,
+					long_term_memory=error_msg
+				)
+
+		@self.registry.action(
 			'Get the accessibility tree of the page in the format "role name" with the number_of_elements to return',
 		)
 		async def get_ax_tree(number_of_elements: int, page: Page):
@@ -716,14 +821,14 @@ Explain the content of the page and that the requested information is not availa
 				dy = scroll_info['viewportHeight']
 
 			# Check if we're already at the bottom
-			if scroll_info['pixelsBelow'] <= 0:
-				msg = 'Already at the bottom of the page - no more content to scroll to'
-				logger.info(msg)
-				return ActionResult(
-					extracted_content=msg, 
-					include_in_memory=True, 
-					long_term_memory='Reached end of page - no more content below'
-				)
+			# if scroll_info['pixelsBelow'] <= 0:
+			# 	msg = 'Already at the bottom of the page - no more content to scroll to'
+			# 	logger.info(msg)
+			# 	return ActionResult(
+			# 		extracted_content=msg, 
+			# 		include_in_memory=True, 
+			# 		long_term_memory='Reached end of page - no more content below'
+			# 	)
 
 			try:
 				await browser_session._scroll_container(cast(int, dy))
@@ -779,14 +884,14 @@ Explain the content of the page and that the requested information is not availa
 				dy = -(scroll_info['viewportHeight'])
 
 			# Check if we're already at the top
-			if scroll_info['pixelsAbove'] <= 0:
-				msg = 'Already at the top of the page - no more content to scroll to'
-				logger.info(msg)
-				return ActionResult(
-					extracted_content=msg, 
-					include_in_memory=True, 
-					long_term_memory='Reached top of page - no more content above'
-				)
+			# if scroll_info['pixelsAbove'] <= 0:
+			# 	msg = 'Already at the top of the page - no more content to scroll to'
+			# 	logger.info(msg)
+			# 	return ActionResult(
+			# 		extracted_content=msg, 
+			# 		include_in_memory=True, 
+			# 		long_term_memory='Reached top of page - no more content above'
+			# 	)
 
 			try:
 				await browser_session._scroll_container(dy)
@@ -1467,6 +1572,264 @@ Explain the content of the page and that the requested information is not availa
 				extracted_content=f'Inputted text {text}',
 				include_in_memory=False,
 				long_term_memory=f"Inputted text '{text}' into cell",
+			)
+
+		# Video Analysis Actions
+		@self.registry.action(
+			'Analyze video content by extracting frames and using AI to answer questions about the video',
+			param_model=AnalyzeVideoAction,
+		)
+		async def analyze_video(params: AnalyzeVideoAction, browser_session: BrowserSession, page_extraction_llm: BaseChatModel):
+			"""Analyze video content on the current page."""
+			import tempfile
+			from browser_use.video import VideoAnalyzer, VideoFrameExtractor
+			
+			page = await browser_session.get_current_page()
+			
+			# Find video element
+			if params.video_selector:
+				video_element = await page.locator(params.video_selector).first
+			else:
+				# Find by index
+				video_elements = await page.locator('video').all()
+				if params.video_index >= len(video_elements):
+					return ActionResult(
+						extracted_content=f'No video found at index {params.video_index}',
+						include_in_memory=True,
+						long_term_memory='Failed to find video'
+					)
+				video_element = video_elements[params.video_index]
+			
+			# Get video source URL
+			video_src = await video_element.get_attribute('src')
+			if not video_src:
+				# Try to find source in source tags
+				source_element = await video_element.locator('source').first
+				if source_element:
+					video_src = await source_element.get_attribute('src')
+			
+			if not video_src:
+				return ActionResult(
+					extracted_content='Could not find video source URL',
+					include_in_memory=True,
+					long_term_memory='Failed to extract video URL'
+				)
+			
+			# Make URL absolute if needed
+			if video_src.startswith('//'):
+				video_src = 'https:' + video_src
+			elif video_src.startswith('/'):
+				from urllib.parse import urljoin
+				video_src = urljoin(page.url, video_src)
+			
+			# Download video to temporary file
+			try:
+				with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_file:
+					tmp_path = tmp_file.name
+				
+				# Use browser session to download
+				async with page.context.expect_download() as download_info:
+					await page.evaluate(f'''
+						const link = document.createElement('a');
+						link.href = '{video_src}';
+						link.download = 'video.mp4';
+						document.body.appendChild(link);
+						link.click();
+						document.body.removeChild(link);
+					''')
+				download = await download_info.value
+				await download.save_as(tmp_path)
+				
+				# Analyze video
+				extractor = VideoFrameExtractor(
+					max_frames=params.max_frames,
+					sample_interval=params.sample_interval
+				)
+				analyzer = VideoAnalyzer(extractor)
+				
+				# Create LLM callback
+				async def llm_callback(frames, prompt, frame_descriptions):
+					# Prepare messages with multiple images
+					content = [
+						{
+							"type": "text",
+							"text": f"Analyze these video frames to answer: {prompt}\n\nFrame information:\n" + "\n".join(frame_descriptions)
+						}
+					]
+					
+					# Add each frame as an image
+					for frame in frames:
+						content.append({
+							"type": "image_url",
+							"image_url": {
+								"url": f"data:image/png;base64,{frame.image_base64}"
+							}
+						})
+					
+					messages = [{"role": "user", "content": content}]
+					response = await page_extraction_llm.ainvoke(messages)
+					return response.content
+				
+				result = await analyzer.analyze_video_file(
+					tmp_path,
+					params.analysis_prompt,
+					llm_callback
+				)
+				
+				# Clean up
+				import os
+				os.unlink(tmp_path)
+				
+				return ActionResult(
+					extracted_content=result.analysis,
+					include_in_memory=True,
+					long_term_memory=f"Analyzed video with {result.frame_count} frames: {result.analysis[:200]}..."
+				)
+				
+			except Exception as e:
+				logger.error(f"Failed to analyze video: {e}")
+				return ActionResult(
+					extracted_content=f"Failed to analyze video: {str(e)}",
+					include_in_memory=True,
+					long_term_memory="Video analysis failed"
+				)
+
+		@self.registry.action(
+			'Extract transcript or captions from a video on the current page',
+			param_model=ExtractVideoTranscriptAction,
+		)
+		async def extract_video_transcript(params: ExtractVideoTranscriptAction, browser_session: BrowserSession):
+			"""Extract transcript/captions from a video."""
+			page = await browser_session.get_current_page()
+			
+			# Find video element
+			if params.video_selector:
+				video_element = await page.locator(params.video_selector).first
+			else:
+				video_elements = await page.locator('video').all()
+				if params.video_index >= len(video_elements):
+					return ActionResult(
+						extracted_content=f'No video found at index {params.video_index}',
+						include_in_memory=True,
+						long_term_memory='Failed to find video'
+					)
+				video_element = video_elements[params.video_index]
+			
+			# Try to extract captions/subtitles
+			# First check for track elements
+			track_elements = await video_element.locator('track[kind="captions"], track[kind="subtitles"]').all()
+			
+			transcript_text = ""
+			
+			for track in track_elements:
+				label = await track.get_attribute('label') or ''
+				srclang = await track.get_attribute('srclang') or ''
+				
+				# Check if this track matches the requested language
+				if params.language and srclang != params.language:
+					continue
+				
+				src = await track.get_attribute('src')
+				if src:
+					# Download and parse the caption file
+					if src.startswith('//'):
+						src = 'https:' + src
+					elif src.startswith('/'):
+						from urllib.parse import urljoin
+						src = urljoin(page.url, src)
+					
+					try:
+						# Fetch the caption file
+						response = await page.context.request.get(src)
+						caption_content = await response.text()
+						
+						# Parse WebVTT format (most common)
+						if 'WEBVTT' in caption_content:
+							lines = caption_content.split('\n')
+							for i, line in enumerate(lines):
+								# Skip timestamps and metadata
+								if '-->' not in line and line.strip() and not line.startswith('WEBVTT'):
+									transcript_text += line.strip() + ' '
+						
+						if transcript_text:
+							break
+							
+					except Exception as e:
+						logger.warning(f"Failed to fetch caption file: {e}")
+			
+			# If no track elements, try YouTube-specific extraction
+			if not transcript_text and 'youtube.com' in page.url:
+				try:
+					# Click on the transcript button if available
+					transcript_button = await page.locator('button[aria-label*="transcript" i], button[aria-label*="Transcript" i]').first
+					if transcript_button:
+						await transcript_button.click()
+						await asyncio.sleep(1)
+						
+						# Extract transcript text
+						transcript_segments = await page.locator('[class*="transcript"][class*="segment"], [class*="caption-line"]').all()
+						for segment in transcript_segments:
+							text = await segment.text_content()
+							if text:
+								transcript_text += text.strip() + ' '
+				except Exception as e:
+					logger.debug(f"YouTube transcript extraction failed: {e}")
+			
+			if transcript_text:
+				return ActionResult(
+					extracted_content=transcript_text.strip(),
+					include_in_memory=True,
+					long_term_memory=f"Extracted video transcript: {transcript_text[:200]}..."
+				)
+			else:
+				return ActionResult(
+					extracted_content="No transcript or captions found for this video",
+					include_in_memory=True,
+					long_term_memory="No video transcript available"
+				)
+
+		@self.registry.action(
+			'Take a snapshot of the current frame of a video',
+			param_model=TakeVideoSnapshotAction,
+		)
+		async def take_video_snapshot(params: TakeVideoSnapshotAction, browser_session: BrowserSession):
+			"""Take a snapshot of video at current or specified time."""
+			page = await browser_session.get_current_page()
+			
+			# Find video element
+			if params.video_selector:
+				video_element = await page.locator(params.video_selector).first
+			else:
+				video_elements = await page.locator('video').all()
+				if params.video_index >= len(video_elements):
+					return ActionResult(
+						extracted_content=f'No video found at index {params.video_index}',
+						include_in_memory=True,
+						long_term_memory='Failed to find video'
+					)
+				video_element = video_elements[params.video_index]
+			
+			# Set video time if specified
+			if params.timestamp is not None:
+				await video_element.evaluate(f'(video) => {{ video.currentTime = {params.timestamp}; }}')
+				await asyncio.sleep(0.5)  # Wait for seek to complete
+			
+			# Get current time
+			current_time = await video_element.evaluate('(video) => video.currentTime')
+			
+			# Take screenshot of video element
+			screenshot_bytes = await video_element.screenshot()
+			
+			# Convert to base64
+			import base64
+			screenshot_base64 = base64.b64encode(screenshot_bytes).decode()
+			
+			return ActionResult(
+				extracted_content=f"Video snapshot taken at {current_time:.1f} seconds",
+				include_in_memory=True,
+				long_term_memory=f"Captured video frame at {current_time:.1f}s",
+				# Store the base64 image in the result for potential use
+				metadata={'screenshot_base64': screenshot_base64}
 			)
 
 	# Register ---------------------------------------------------------------

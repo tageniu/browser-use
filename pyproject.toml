@@ -14,6 +14,7 @@ dependencies = [
     "aiofiles>=24.1.0",
     "anyio>=4.9.0",
     "bubus>=1.1.2",
+    "datasets>=3.0.0",
     "google-api-core>=2.25.0",
     "httpx>=0.28.1",
     "markdownify==1.1.0",
@@ -35,6 +36,11 @@ dependencies = [
     "openai>=1.81.0",
     "anthropic>=0.54.0",
     "groq>=0.28.0",
+    "opencv-python>=4.8.0",
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "SpeechRecognition>=3.10.0",
+    "pydub>=0.25.1",
 ]
 # google-api-core: only used for Google LLM APIs
 # pyperclip: only used for examples that use copy/paste
@@ -45,6 +51,9 @@ dependencies = [
 # rich: used for terminal formatting and styling in CLI
 # click: used for command-line argument parsing
 # textual: used for terminal UI
+# opencv-python: used for video frame extraction and processing
+# pillow: used for image manipulation in video analysis
+# numpy: used for efficient array operations in video processing
 
 [project.optional-dependencies]
 memory = [
@@ -70,6 +79,10 @@ eval = [
     "anyio>=4.9.0",
     "Pillow>=11.2.1",
     "psutil>=7.0.0",
+]
+pdf = [
+    "PyPDF2>=3.0.0",
+    "pdfplumber>=0.10.0",
 ]
 all = [
     "browser-use[memory,cli,examples]",
