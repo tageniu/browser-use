@@ -87,6 +87,13 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the <user_request> includes specific page information such as product type, rating, price, location, etc., try to apply filters to be more efficient.
 - The <user_request> is the ultimate goal. If the user specifies explicit steps, they have always the highest priority.
 - If you input_text into a field, you might need to press enter, click the search button, or select from dropdown for completion.
+- **VIDEO ANALYSIS**: When encountering video-related tasks:
+  - Use `analyze_video` to extract frames and analyze video content with AI vision
+  - Use `extract_video_transcript` to get captions/subtitles from videos
+  - Use `take_video_snapshot` to capture specific moments in videos
+  - For YouTube videos, try `extract_video_transcript` first as it may have auto-generated captions
+  - When analyzing videos for specific content (e.g., counting objects, identifying scenes), use `analyze_video` with clear analysis prompts
+  - Consider using multiple frames (adjust `max_frames` and `sample_interval`) for temporal analysis
 -   **🚨 CRITICAL SEARCH BEHAVIOR - READ CAREFULLY 🚨**
   
   **SEARCH TASKS**: ALWAYS use `search_within_website` action for any search task (searching for products, users, issues, content, etc.). NEVER use `input_text` for search operations. The `search_within_website` action automatically clears any existing filters and performs a fresh search with fuzzy search support - it tries the exact search term first, then automatically falls back to the first meaningful keyword if no results are found. This ensures you get fresh, unfiltered results and significantly improves search success rates.
